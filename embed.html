@@ -1,0 +1,115 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SyncPair embed</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#stage,#stage iframe,#stage div{width:100%;height:100%;border:0}</style>
+</head><body><div id="stage"></div>
+<script>
+// One command/state protocol for every embeddable player.
+//  in : {t:'load',provider,ref,start(ms),autoplay} {t:'play'} {t:'pause'} {t:'seek',ms}
+//  out: {t:'ready'} {t:'state',pos,dur,playing} {t:'ended'} {t:'error',msg}
+(function () {
+  var stage = document.getElementById('stage'), cur = null, st = { pos: 0, dur: 0, playing: false };
+  function emit(o) {
+    try { if (window.Bridge) window.Bridge.postMessage(JSON.stringify(o)); } catch (e) {}
+    try { if (parent !== window) parent.postMessage({ syncpairEmbed: o }, '*'); } catch (e) {}
+  }
+  function push() { emit({ t: 'state', pos: st.pos, dur: st.dur, playing: st.playing }); }
+  function script(src, onload) { var s = document.createElement('script'); s.src = src; s.async = true; s.onload = onload; s.onerror = function () { emit({ t: 'error', msg: 'Could not load the player.' }); }; document.head.appendChild(s); }
+  var drivers = {};
+  // cfg = what the caller wants once the player is ready (start position / autoplay). Commands that arrive
+  // while a player is still loading just update cfg, so a partner's "play" is never lost.
+  var cfg = { start: 0, auto: false }, loaded = false;
+  function markReady() { loaded = true; }
+
+  drivers.youtube = (function () {
+    var p = null, ready = false, timer = null;
+    function create(ref) {
+      var d = document.createElement('div'); d.id = 'ytp'; stage.innerHTML = ''; stage.appendChild(d);
+      p = new YT.Player('ytp', { width: '100%', height: '100%', videoId: ref, playerVars: { playsinline: 1, rel: 0, controls: 0, disablekb: 1 }, events: {
+        onReady: function () { ready = true; timer = setInterval(poll, 400); if (cfg.start > 0) p.seekTo(cfg.start / 1000, true); if (cfg.auto) p.playVideo(); markReady(); },
+        onStateChange: function (e) { if (e.data === 0) emit({ t: 'ended' }); poll(); },
+        onError: function () { emit({ t: 'error', msg: 'This video cannot be played in an embedded player.' }); } } });
+    }
+    function poll() { if (!ready) return; try { st.pos = p.getCurrentTime() * 1000; st.dur = p.getDuration() * 1000; var s = p.getPlayerState(); st.playing = (s === 1 || s === 3); push(); } catch (e) {} }
+    return {
+      load: function (ref) {
+        if (p && ready) { var a = { videoId: ref, startSeconds: cfg.start / 1000 }; if (cfg.auto) p.loadVideoById(a); else p.cueVideoById(a); return true; }
+        if (window.YT && YT.Player) create(ref);
+        else { window.onYouTubeIframeAPIReady = function () { create(ref); }; script('https://www.youtube.com/iframe_api'); }
+      },
+      play: function () { p && ready && p.playVideo(); }, pause: function () { p && ready && p.pauseVideo(); }, seek: function (ms) { p && ready && p.seekTo(ms / 1000, true); },
+      reset: function () { clearInterval(timer); p = null; ready = false; }
+    };
+  })();
+
+  drivers.spotify = (function () {
+    var c = null;
+    function go() { if (cfg.auto) c.play(); if (cfg.start > 0) setTimeout(function () { c.seek(cfg.start / 1000); }, 1200); }
+    function make(A, ref) {
+      var d = document.createElement('div'); stage.innerHTML = ''; stage.appendChild(d);
+      A.createController(d, { uri: ref, width: '100%', height: 152 }, function (ctl) {
+        c = ctl;
+        c.addListener('playback_update', function (e) { var x = e.data || {}; st.pos = x.position || 0; st.dur = x.duration || 0; st.playing = !x.isPaused; push(); });
+        c.addListener('ready', function () { go(); markReady(); });
+        setTimeout(markReady, 4000); // safety: never leave commands queued forever
+      });
+    }
+    return {
+      load: function (ref) {
+        if (c) { c.loadUri(ref); go(); return true; }
+        if (window.__spA) make(window.__spA, ref);
+        else { window.onSpotifyIframeApiReady = function (A) { window.__spA = A; make(A, ref); }; script('https://open.spotify.com/embed/iframe-api/v1'); }
+      },
+      play: function () { if (c) { if (c.resume) c.resume(); else c.play(); } }, pause: function () { c && c.pause(); }, seek: function (ms) { c && c.seek(ms / 1000); },
+      reset: function () { c = null; }
+    };
+  })();
+
+  drivers.soundcloud = (function () {
+    var w = null, ready = false;
+    function create(ref) {
+      stage.innerHTML = ''; ready = false;
+      var f = document.createElement('iframe'); f.allow = 'autoplay';
+      f.src = 'https://w.soundcloud.com/player/?url=' + encodeURIComponent(ref) + '&auto_play=false&visual=false&show_comments=false&hide_related=true';
+      stage.appendChild(f); w = SC.Widget(f);
+      w.bind(SC.Widget.Events.READY, function () { ready = true; w.getDuration(function (d) { st.dur = d; push(); }); if (cfg.start > 0) w.seekTo(cfg.start); if (cfg.auto) w.play(); markReady(); });
+      w.bind(SC.Widget.Events.PLAY_PROGRESS, function (e) { st.pos = e.currentPosition; push(); });
+      w.bind(SC.Widget.Events.PLAY, function () { st.playing = true; push(); });
+      w.bind(SC.Widget.Events.PAUSE, function () { st.playing = false; push(); });
+      w.bind(SC.Widget.Events.FINISH, function () { st.playing = false; push(); emit({ t: 'ended' }); });
+    }
+    return {
+      load: function (ref) { if (window.SC) create(ref); else script('https://w.soundcloud.com/player/api.js', function () { create(ref); }); },
+      play: function () { ready && w.play(); }, pause: function () { ready && w.pause(); }, seek: function (ms) { ready && w.seekTo(ms); },
+      reset: function () { w = null; ready = false; }
+    };
+  })();
+
+  var VALID = {
+    youtube: /^[\w-]{11}$/,
+    spotify: /^spotify:(track|episode|album|playlist|show):[A-Za-z0-9]{22}$/,
+    soundcloud: /^https:\/\/soundcloud\.com\/[^\s]+$/
+  };
+  function cmd(m) {
+    if (typeof m === 'string') { try { m = JSON.parse(m); } catch (e) { return; } }
+    if (!m) return;
+    if (m.t === 'load') {
+      var d = drivers[m.provider];
+      if (!d || !VALID[m.provider].test(String(m.ref))) { emit({ t: 'error', msg: 'Unsupported link.' }); return; }
+      if (cur && cur !== m.provider) { drivers[cur].reset(); stage.innerHTML = ''; }
+      cur = m.provider; st = { pos: m.start || 0, dur: 0, playing: false };
+      cfg.start = m.start || 0; cfg.auto = !!m.autoplay; loaded = false;
+      loaded = !!d.load(m.ref); return;
+    }
+    if (!cur) return; var dr = drivers[cur];
+    if (!loaded) { // still loading: remember the wish, the driver applies it when ready
+      if (m.t === 'play') cfg.auto = true; else if (m.t === 'pause') cfg.auto = false; else if (m.t === 'seek') cfg.start = Number(m.ms) || 0;
+      return;
+    }
+    if (m.t === 'play') dr.play(); else if (m.t === 'pause') dr.pause(); else if (m.t === 'seek') dr.seek(Number(m.ms) || 0);
+  }
+  window.bridge = { cmd: cmd };
+  window.addEventListener('message', function (e) { if (e.source !== parent) return; var m = e.data && e.data.syncpairCmd; if (m) cmd(m); });
+  emit({ t: 'ready' });
+})();
+</script></body></html>

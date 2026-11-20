@@ -1,0 +1,17 @@
+{
+  "name": "syncpair-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted real-time synchronized music player for paired listeners",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}

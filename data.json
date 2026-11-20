@@ -1,0 +1,118 @@
+{
+  "users": [
+    {
+      "id": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+      "name": "nourhene",
+      "code": "965CE2",
+      "partnerId": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113",
+      "tokenHash": "71210e6b9276677788af648dcad6362fbc6c9388bf156d9be806a706eddbe19c",
+      "recent": [
+        {
+          "key": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "trackId": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+          "playedAt": 1795197696500
+        },
+        {
+          "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "trackId": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+          "playedAt": 1795197695397
+        }
+      ]
+    },
+    {
+      "id": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113",
+      "name": "benji",
+      "code": "B2580B",
+      "partnerId": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+      "tokenHash": "4ad9ae2cde89b2202e15a8a90fdbba6ed9d9e97781409e66fda7d3164e8080d5",
+      "recent": [
+        {
+          "key": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "trackId": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113",
+          "playedAt": 1795197696593
+        },
+        {
+          "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "trackId": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113",
+          "playedAt": 1795197695490
+        }
+      ]
+    }
+  ],
+  "tracks": [
+    {
+      "id": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+      "title": "Mitski - My Love Mine All Mine",
+      "artist": "Unknown artist",
+      "durationMs": 138368,
+      "url": "/music/097dc4a0-d010-4187-8f3e-87325177b1a7.mp3",
+      "fileName": "Mitski - My Love Mine All Mine.mp3",
+      "size": 2240098,
+      "uploadedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a"
+    },
+    {
+      "id": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+      "title": "Mitski - My Love Mine All Mine",
+      "artist": "Unknown artist",
+      "durationMs": 138368,
+      "url": "/music/0b1cf4b8-85f6-4aab-9ac5-af18681735fa.mp3",
+      "fileName": "Mitski - My Love Mine All Mine.mp3",
+      "size": 2240098,
+      "uploadedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a"
+    }
+  ],
+  "pairs": {
+    "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113:u_ae405695-4089-4134-8082-aa76dcfae42a": {
+      "favorites": [
+        {
+          "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "trackId": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a"
+        }
+      ],
+      "playlists": [
+        {
+          "id": "13245E0659",
+          "name": "love",
+          "items": [],
+          "createdBy": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113"
+        }
+      ]
+    }
+  }
+}

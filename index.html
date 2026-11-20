@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="theme-color" content="#160f1c"/>
+  <title>SyncPair — listen together</title>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<main>
+  <section id="screen-pair" class="screen">
+    <h1>🎧 SyncPair</h1>
+    <p class="dim">Your music. Together, wherever you are.</p>
+    <div id="create-box">
+      <input id="inp-name" placeholder="Your name" maxlength="30" autocomplete="name"/>
+      <button id="btn-create" class="primary">Create account</button>
+    </div>
+    <div id="pair-box" class="hidden">
+      <div class="card"><p>Your pair code</p><b id="my-code" class="code"></b><p class="dim small">Share this code with your partner.</p></div>
+      <input id="inp-code" placeholder="Partner's code" maxlength="6" autocomplete="off"/>
+      <button id="btn-join-code" class="primary">Pair with partner</button>
+      <p class="dim small">Your partner must also create an account and share their code with you.</p>
+    </div>
+  </section>
+
+  <section id="screen-home" class="screen hidden">
+    <header class="row between"><h2 id="me-name"></h2><span id="presence" class="dot" title="partner status"></span></header>
+    <section class="theme-panel" aria-label="Customize SyncPair">
+      <h3>♡ Make it yours</h3><p class="dim small">Choose the mood of your little listening room.</p>
+      <div class="theme-swatches" id="theme-presets">
+        <button class="theme-chip active" data-theme="rose"><span class="theme-dot" style="--c1:#e6a5c4;--c2:#b88ad4"></span> Rose velvet</button>
+        <button class="theme-chip" data-theme="lavender"><span class="theme-dot" style="--c1:#c5b5f3;--c2:#8f79cb"></span> Lavender dusk</button>
+        <button class="theme-chip" data-theme="peach"><span class="theme-dot" style="--c1:#ffc2a7;--c2:#e89bba"></span> Peach candlelight</button>
+        <button class="theme-chip" data-theme="blue"><span class="theme-dot" style="--c1:#9ec8e7;--c2:#7e91c9"></span> Midnight blue</button>
+        <button class="theme-chip" data-theme="green"><span class="theme-dot" style="--c1:#a5d0bd;--c2:#7caa9c"></span> Sage garden</button>
+      </div>
+      <details><summary>Custom colors</summary>
+        <div class="theme-custom-row">
+          <label>Accent <input type="color" id="theme-accent" value="#e6a5c4"></label>
+          <label>Secondary <input type="color" id="theme-accent2" value="#b88ad4"></label>
+          <label>Background <input type="color" id="theme-bg" value="#160f1c"></label>
+          <button id="theme-reset" class="mini">Reset</button>
+        </div>
+      </details>
+      <label for="room-name">Room name</label><input id="room-name" placeholder="e.g. our little universe" maxlength="40"/>
+      <p class="dim small">Room name stays on this device.</p>
+    </section>
+    <div id="partner-card" class="card"><p class="dim">Waiting for your partner…</p></div>
+    <section class="card library-card">
+      <div class="row between"><div><h3>Your shared library</h3><p class="dim small">Upload audio you have the right to share. Both phones use this library.</p></div><span id="track-count" class="pill">0 tracks</span></div>
+      <label class="file-label" for="audio-file">＋ Add music files</label>
+      <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm" multiple hidden/>
+      <p id="upload-status" class="dim small" aria-live="polite"></p>
+      <div id="library-list" class="library-list"></div>
+    </section>
+    <section class="card">
+      <h3>Share a song from any player</h3>
+      <p class="dim small">Playing something in another app? Send title and artist to your partner.</p>
+      <input id="sug-title" placeholder="Title" maxlength="150"/><input id="sug-artist" placeholder="Artist" maxlength="100"/><input id="sug-link" placeholder="Link (optional)" maxlength="500"/>
+      <button id="btn-suggest" class="primary">Send to partner</button>
+    </section>
+    <div id="suggest-banner" class="card hidden"></div>
+    <section class="card"><div class="row between"><h3>🕘 Recently played</h3><button id="btn-clear-recent" class="mini" aria-label="Clear recently played">Clear</button></div><div id="recent-list" class="library-list"></div></section>
+    <section class="card"><h3>♥ Favorites together</h3><div id="fav-list" class="library-list"></div></section>
+    <section class="card"><div class="row between"><h3>Playlists</h3><button id="btn-new-playlist">＋ New</button></div><div id="playlist-list" class="library-list"></div></section>
+    <div class="card now-card">
+      <h3 class="dim">Now playing on your device</h3>
+      <div class="row"><div id="me-art" class="art"></div><div class="track-info"><h3 id="me-title">Choose a track</h3><p class="dim" id="me-artist">Add music to your library to begin.</p></div></div>
+      <div class="bar"><div id="me-prog" class="bar-fill"></div></div>
+      <input id="me-seek" class="seek" type="range" min="0" max="1000" value="0" aria-label="Seek playback position"/>
+      <div class="row between"><span id="me-time" class="dim small">0:00</span><span id="me-duration" class="dim small">0:00</span></div>
+      <div class="transport"><button id="me-prev" aria-label="Previous track">⏮</button><button id="me-play" class="primary" aria-label="Play">▶</button><button id="me-next" aria-label="Next track">⏭</button></div>
+      <p id="player-status" class="dim small" aria-live="polite">Select a track to play.</p>
+    </div>
+    <div id="invite-banner" class="card hidden"></div>
+  </section>
+
+  <section id="screen-session" class="screen hidden">
+    <div id="art-wrap"><div id="sess-art" class="art big"></div><div id="floaters"></div></div>
+    <h2 id="sess-title">—</h2><p class="dim" id="sess-artist"></p>
+    <div class="bar"><div id="sess-prog" class="bar-fill"></div></div>
+    <input id="sess-seek" class="seek" type="range" min="0" max="1000" value="0" aria-label="Seek playback position"/>
+    <div class="row between"><span id="sess-time" class="dim small">0:00</span><span id="sess-duration" class="dim small">0:00</span></div>
+    <div class="transport"><button id="s-prev" aria-label="Previous track">⏮</button><button id="s-play" class="primary big-btn" aria-label="Play">▶</button><button id="s-next" aria-label="Next track">⏭</button></div>
+    <p id="session-status" class="dim small">Synced listening session</p>
+    <div id="reactions"></div><div id="log" class="log" aria-live="polite"></div>
+    <div class="row"><input id="chat-inp" placeholder="Say something…" maxlength="500"/><button id="chat-send">Send</button></div>
+    <button id="btn-leave" class="danger">Leave session</button>
+  </section>
+  <div id="embed-wrap" class="hidden"><iframe id="embed-frame" title="Shared link player" allow="autoplay; encrypted-media; fullscreen"></iframe></div>
+  <button id="tap-play" class="primary hidden">▶ Tap to start playing</button>
+  <div id="other-panel" class="card hidden"><p id="other-text" class="small"></p><a id="other-open" class="mini" target="_blank" rel="noopener noreferrer">Open in app</a></div>
+</main>
+<audio id="audio-player" preload="metadata"></audio>
+<script src="/socket.io/socket.io.js"></script><script src="app.js"></script>
+</body>
+</html>
