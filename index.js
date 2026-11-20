@@ -167,8 +167,10 @@ const pairKey = (a, b) => [a, b].sort().join(':');
 function pairOf(uid) {
   const partner = partnerOf(uid); if (!partner) return null;
   const key = pairKey(uid, partner.id);
-  if (!pairs.has(key)) pairs.set(key, { favorites: [], playlists: [] });
-  return { key, data: pairs.get(key), partner };
+  if (!pairs.has(key)) pairs.set(key, { favorites: [], playlists: [], notes: [] });
+  const data = pairs.get(key);
+  if (!Array.isArray(data.notes)) data.notes = []; // migrate existing pair data
+  return { key, data, partner };
 }
 // Normalises a song reference: either a library track (trackId) or metadata-only (shared from any player).
 function cleanItem(i, uid) {
@@ -232,9 +234,41 @@ io.on('connection', socket => {
     socket.emit('session:started', { session: sess });
     return sess;
   }
-  const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists });
+  const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [] });
   const pushShared = pr => { saveData(); io.to('user:' + me.id).to('user:' + pr.partner.id).emit('shared:update', sharedPayload(pr)); };
   const NEED_PAIR = { ok: false, error: 'Pair with someone first.' };
+
+  // Little notes live on the couple's partner-profile wall, outside listening sessions.
+  socket.on('notes:get', (_payload, ack = () => {}) => {
+    const pr = pairOf(me.id);
+    ack(pr ? { ok: true, notes: pr.data.notes || [] } : NEED_PAIR);
+  });
+  limited('note:add', 12, 60_000, (payload = {}, ack = () => {}) => {
+    const pr = pairOf(me.id);
+    if (!pr) return ack(NEED_PAIR);
+    const text = String(payload.text || '').trim().slice(0, 280);
+    if (!text) return ack({ ok: false, error: 'Write a little note first.' });
+    if (pr.data.notes.length >= 200) return ack({ ok: false, error: 'Your note wall is full.' });
+    const note = {
+      id: crypto.randomUUID(),
+      fromId: me.id,
+      fromName: me.name,
+      text,
+      createdAt: Date.now()
+    };
+    pr.data.notes.push(note);
+    pushShared(pr);
+    ack({ ok: true, note });
+  });
+  limited('note:delete', 20, 60_000, (payload = {}, ack = () => {}) => {
+    const pr = pairOf(me.id);
+    if (!pr) return ack(NEED_PAIR);
+    const index = pr.data.notes.findIndex(n => n.id === payload.id && n.fromId === me.id);
+    if (index < 0) return ack({ ok: false, error: 'You can only remove notes you wrote.' });
+    pr.data.notes.splice(index, 1);
+    pushShared(pr);
+    ack({ ok: true });
+  });
   // Recently played: per account (not shared), newest first, stored in data.json with the user.
   const RECENT_MAX = 30;
   socket.on('recent:get', (_p, ack = () => {}) => ack({ ok: true, recent: me.recent || [] }));

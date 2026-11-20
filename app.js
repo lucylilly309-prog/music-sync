@@ -8,7 +8,8 @@ let library = [], serverOffset = 0, isApplyingRemote = false;
 let seekDragging = false;
 let lastCorrection = 0, wantPlaying = false, lastPlayCmd = 0, playRetries = 0;
 let recent = [], lastRecent = { id: null, at: 0 };
-let shared = { favorites: [], playlists: [] }, queue = null, pendingItem = null, suggestion = null;
+let shared = { favorites: [], playlists: [], notes: [] }, queue = null, pendingItem = null, suggestion = null;
+let shuffleOn = false, repeatMode = 'off', sleepDeadline = 0, sleepAtTrackEnd = false, sleepInterval = null;
 
 // ---- Link tracks: embedded players (YouTube/Spotify/SoundCloud) and a shared clock for apps without an API ----
 const EMBED_PROVIDERS = ['youtube', 'spotify', 'soundcloud'];
@@ -39,12 +40,48 @@ window.addEventListener('message', e => {
   }
   else if (m.t === 'error') { $('#player-status').textContent = m.msg; $('#session-status').textContent = m.msg; }
 });
+function placeEmbed(restoreAfterMove = true) {
+  const wrap = $('#embed-wrap');
+  if (!wrap) return false;
+  const sessionScreen = $('#screen-session');
+  let parent, before;
+  if (sessionScreen && !sessionScreen.classList.contains('hidden')) {
+    parent = sessionScreen;
+    before = $('#sess-title');
+  } else {
+    parent = document.querySelector('#screen-home .now-card');
+    before = parent?.querySelector(':scope > .row');
+  }
+  if (!parent || !before || (wrap.parentElement === parent && wrap.nextElementSibling === before)) return false;
+
+  // Moving an iframe between DOM parents can reload its browsing context in some browsers.
+  // Recreate the local bridge and restore the current link track after the new frame is ready.
+  parent.insertBefore(wrap, before);
+  const track = player?.track;
+  if (embed.ready) {
+    const shouldRestore = restoreAfterMove && isEmbed(track);
+    const position = shouldRestore ? Math.max(0, Math.round(player.pos())) : 0;
+    const autoplay = shouldRestore && player.playing;
+    // Release any in-flight load waiting on the old frame before replacing its bridge.
+    embed.resolve?.();
+    embed.ready = new Promise(resolve => { embed.resolve = resolve; });
+    $('#embed-frame').src = '/embed.html?relocated=' + Date.now();
+    if (shouldRestore) {
+      embed.ready.then(() => {
+        if (player.track?.id !== track.id) return;
+        embedSend({ t: 'load', provider: track.provider, ref: track.ref, start: position, autoplay });
+      });
+    }
+  }
+  return true;
+}
 function showLinkUI(track) {
   const wrap = $('#embed-wrap'), other = $('#other-panel');
   wrap.classList.toggle('hidden', !isEmbed(track));
   wrap.classList.toggle('spotify', track?.provider === 'spotify');
   wrap.classList.toggle('soundcloud', track?.provider === 'soundcloud');
   wrap.classList.toggle('interactive', track?.provider === 'spotify'); // Spotify needs one tap inside its own player
+  placeEmbed(false);
   other.classList.toggle('hidden', !isVirtual(track));
   if (isVirtual(track)) {
     $('#other-text').textContent = `${track.app || 'This app'} can’t be controlled from here. Open the song in your app and press play when the timer starts. Play and pause here cue your partner.`;
@@ -140,7 +177,7 @@ function artStyle(track) {
   let h = 0; for (const ch of String(track?.id || 'music')) h = (h * 31 + ch.charCodeAt(0)) % 360;
   return `background:linear-gradient(135deg,hsl(${h},70%,55%),hsl(${(h + 50) % 360},70%,38%));`;
 }
-function show(id) { document.querySelectorAll('.screen').forEach(e => e.classList.add('hidden')); $(id).classList.remove('hidden'); }
+function show(id) { document.querySelectorAll('.screen').forEach(e => e.classList.add('hidden')); $(id).classList.remove('hidden'); placeEmbed(); }
 function safeLog(message, strongPrefix = '') {
   const log = $('#log'); if (!log) return;
   const line = document.createElement('div');
@@ -156,7 +193,7 @@ function connectMine(token) {
   socket = io({ auth: { token } });
   socket.on('connect', () => { refreshShared(); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
-  socket.on('shared:update', st => { shared = st; renderShared(); renderLibrary(); });
+  socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); });
   socket.on('track:suggest', s => { suggestion = s; renderSuggestBanner(); });
   socket.on('connect_error', err => { $('#upload-status').textContent = err.message; });
   socket.on('clock:sync', ({ serverTime }) => { serverOffset = serverTime - Date.now(); });
@@ -185,19 +222,99 @@ function renderHome() {
 }
 function renderPartnerCard() {
   const card = $('#partner-card'); card.replaceChildren();
-  if (!partner) { const p = document.createElement('p'); p.className = 'dim'; p.textContent = 'Pair with your partner using their code to start listening together.'; card.append(p); return; }
+  if (!partner) {
+    const p = document.createElement('p'); p.className = 'dim';
+    p.textContent = 'Pair with your partner using their code to start leaving little notes.';
+    card.append(p); return;
+  }
+
+  const top = document.createElement('div'); top.className = 'profile-heading';
+  const avatar = document.createElement('div'); avatar.className = 'profile-avatar';
+  avatar.textContent = (partner.name || '?').trim().slice(0, 1).toUpperCase();
+  const details = document.createElement('div'); details.className = 'profile-identity';
+  const eyebrow = document.createElement('span'); eyebrow.className = 'profile-eyebrow'; eyebrow.textContent = 'YOUR PERSON';
   const heading = document.createElement('h3'); heading.textContent = partner.name;
-  const status = document.createElement('p'); status.className = 'dim small'; status.textContent = partnerOnline ? 'Online' : 'Offline';
-  card.append(heading, status);
+  const status = document.createElement('p'); status.className = 'dim small profile-status';
+  status.innerHTML = `<span class="dot ${partnerOnline ? 'on' : ''}"></span> ${partnerOnline ? 'Around right now' : 'A little away'}`;
+  details.append(eyebrow, heading, status); top.append(avatar, details);
+  card.append(top);
+
   if (partnerState?.track) {
+    const now = document.createElement('div'); now.className = 'profile-now-playing';
+    const kicker = document.createElement('span'); kicker.className = 'profile-eyebrow'; kicker.textContent = 'IN THEIR HEADPHONES';
     const row = document.createElement('div'); row.className = 'row partner-track';
     const art = document.createElement('div'); art.className = 'art'; art.style.cssText = artStyle(partnerState.track);
-    const info = document.createElement('div'); const title = document.createElement('b'); title.textContent = partnerState.track.title;
+    const info = document.createElement('div'); info.className = 'profile-track-info';
+    const title = document.createElement('b'); title.textContent = partnerState.track.title;
     const artist = document.createElement('p'); artist.className = 'dim small'; artist.textContent = partnerState.track.artist;
-    const playing = document.createElement('p'); playing.className = 'small ' + (partnerState.isPlaying ? 'live' : 'dim'); playing.textContent = partnerState.isPlaying ? '▶ Listening now' : '⏸ Paused';
-    info.append(title, artist, playing); row.append(art, info); card.append(row);
+    const playing = document.createElement('p'); playing.className = 'small ' + (partnerState.isPlaying ? 'live' : 'dim');
+    playing.textContent = partnerState.isPlaying ? '♫ Listening now' : 'Ⅱ Taking a pause';
+    info.append(title, artist, playing); row.append(art, info); now.append(kicker, row); card.append(now);
   }
-  if (partner && !session) { const button = document.createElement('button'); button.className = 'primary'; button.textContent = '🎧 Listen together'; button.onclick = startSession; card.append(button); }
+
+  const wall = document.createElement('section'); wall.className = 'profile-note-wall';
+  const wallHead = document.createElement('div'); wallHead.className = 'profile-wall-heading';
+  const wallTitle = document.createElement('div');
+  const title = document.createElement('h4'); title.textContent = 'Little notes';
+  const subtitle = document.createElement('p'); subtitle.className = 'dim small'; subtitle.textContent = 'Leave something sweet on their profile.';
+  wallTitle.append(title, subtitle);
+  const count = document.createElement('span'); count.className = 'profile-note-count';
+  count.textContent = `${(shared.notes || []).length} ♡`;
+  wallHead.append(wallTitle, count); wall.append(wallHead);
+
+  const composer = document.createElement('div'); composer.className = 'profile-note-composer';
+  const input = document.createElement('textarea');
+  input.maxLength = 280; input.rows = 2;
+  input.placeholder = 'A tiny reminder, an inside joke, or just “thinking of you”…';
+  input.setAttribute('aria-label', 'Write a note for your partner');
+  const composeFoot = document.createElement('div'); composeFoot.className = 'profile-note-compose-foot';
+  const hint = document.createElement('span'); hint.className = 'dim small'; hint.textContent = '280 characters · just between you two';
+  const send = document.createElement('button'); send.className = 'primary mini'; send.textContent = 'Leave a note ♡';
+  send.onclick = () => {
+    const text = input.value.trim();
+    if (!text) { input.focus(); return; }
+    send.disabled = true;
+    socket.emit('note:add', { text }, result => {
+      send.disabled = false;
+      if (!result?.ok) { alert(result?.error || 'Could not leave your note.'); return; }
+      input.value = '';
+      input.placeholder = 'Your note is on their profile ♡';
+    });
+  };
+  composeFoot.append(hint, send); composer.append(input, composeFoot); wall.append(composer);
+
+  const notes = document.createElement('div'); notes.className = 'profile-notes';
+  const ordered = [...(shared.notes || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (!ordered.length) {
+    const empty = document.createElement('p'); empty.className = 'profile-notes-empty';
+    empty.textContent = 'No little notes yet. You could leave the first one ✧';
+    notes.append(empty);
+  } else {
+    ordered.forEach((note, index) => {
+      const item = document.createElement('article'); item.className = `sticky-note sticky-note-${index % 3}`;
+      const noteText = document.createElement('p'); noteText.textContent = note.text;
+      const meta = document.createElement('div'); meta.className = 'sticky-note-meta';
+      const by = document.createElement('span'); by.textContent = `♡ ${note.fromName || 'Someone special'}`;
+      const when = document.createElement('time');
+      when.textContent = note.createdAt ? new Date(note.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+      meta.append(by, when); item.append(noteText, meta);
+      if (note.fromId === me.id) {
+        const remove = document.createElement('button'); remove.className = 'note-delete'; remove.textContent = '×';
+        remove.title = 'Remove your note'; remove.setAttribute('aria-label', 'Remove your note');
+        remove.onclick = () => socket.emit('note:delete', { id: note.id }, result => {
+          if (!result?.ok) alert(result?.error || 'Could not remove note.');
+        });
+        item.append(remove);
+      }
+      notes.append(item);
+    });
+  }
+  wall.append(notes); card.append(wall);
+
+  if (partner && !session) {
+    const button = document.createElement('button'); button.className = 'primary profile-listen-btn';
+    button.textContent = '♡ Listen together'; button.onclick = startSession; card.append(button);
+  }
 }
 function renderInviteBanner(from) {
   const banner = $('#invite-banner'); banner.replaceChildren();
@@ -217,7 +334,7 @@ function renderPlayer(force = false) {
   if (!force && key === lastRenderKey) return;
   lastRenderKey = key;
   $('#me-art').style.cssText = artStyle(track); $('#me-title').textContent = track.title; $('#me-artist').textContent = track.artist;
-  $('#sess-art').style.cssText = artStyle(track); $('#sess-title').textContent = track.title; $('#sess-artist').textContent = track.artist;
+  $('#sess-title').textContent = track.title; $('#sess-artist').textContent = track.artist;
   $('#me-play').textContent = player.playing ? '⏸' : '▶'; $('#s-play').textContent = player.playing ? '⏸' : '▶';
   const duration = player.duration();
   $('#me-duration').textContent = fmt(duration); $('#sess-duration').textContent = fmt(duration);
@@ -226,7 +343,12 @@ function renderLibrary() {
   const list = $('#library-list'); list.replaceChildren();
   $('#track-count').textContent = `${library.length} ${library.length === 1 ? 'track' : 'tracks'}`;
   if (!library.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'Your library is empty. Upload an audio file to get started.'; list.append(p); return; }
-  library.forEach(track => {
+  const term = ($('#library-search')?.value || '').trim().toLowerCase();
+  const sort = $('#library-sort')?.value || 'added';
+  const visible = library.filter(t => !term || `${t.title} ${t.artist || ''}`.toLowerCase().includes(term));
+  visible.sort((a,b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'artist' ? (a.artist||'').localeCompare(b.artist||'') : sort === 'duration' ? (b.durationMs||0)-(a.durationMs||0) : 0);
+  if (!visible.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = term ? 'No songs match your search.' : 'Your library is empty.'; list.append(p); return; }
+  visible.forEach(track => {
     const row = document.createElement('div'); row.className = 'library-row';
     const details = document.createElement('div'); details.className = 'track-info';
     const title = document.createElement('b'); title.textContent = track.title;
@@ -288,7 +410,14 @@ function currentIndex() { return library.findIndex(t => t.id === player.track?.i
 async function skip(direction) {
   const list = queue?.length ? queue : library;
   if (!list.length) { $('#player-status').textContent = 'Upload music before playing.'; return; }
-  const index = list.findIndex(t => t.id === player.track?.id); const next = (index < 0 ? 0 : (index + direction + list.length) % list.length);
+  const index = list.findIndex(t => t.id === player.track?.id);
+  if (direction > 0 && repeatMode === 'one' && index >= 0) return selectTrack(list[index], true);
+  if (direction > 0 && repeatMode === 'off' && !shuffleOn && index === list.length - 1) { player.pause(); player.seek(0); renderPlayer(true); $('#player-status').textContent = 'Playlist finished.'; return; }
+  let next;
+  if (shuffleOn && list.length > 1 && direction > 0) {
+    const choices = list.map((_, i) => i).filter(i => i !== index);
+    next = choices[Math.floor(Math.random() * choices.length)];
+  } else next = (index < 0 ? 0 : (index + direction + list.length) % list.length);
   await selectTrack(list[next], true);
 }
 function publishState() {
@@ -366,7 +495,7 @@ setInterval(() => { if (isLinkTrack(player.track)) updateProgress(); }, 500);
 audio.addEventListener('play', () => { renderPlayer(); });
 audio.addEventListener('pause', () => { renderPlayer(); });
 audio.addEventListener('loadedmetadata', renderPlayer);
-audio.addEventListener('ended', () => { if (!isApplyingRemote) skip(1); });
+audio.addEventListener('ended', () => { if (sleepAtTrackEnd) { stopForSleep(); return; } if (!isApplyingRemote) skip(1); });
 audio.addEventListener('error', () => { if (player.track) $('#player-status').textContent = 'Audio could not be played. Try converting it to MP3 or AAC.'; });
 
 setInterval(() => {
@@ -424,7 +553,7 @@ $('#chat-send').onclick = sendChat; $('#chat-inp').addEventListener('keydown', e
 const keyOf = i => i.trackId || ('ext:' + ((i.title || '').trim() + '|' + (i.artist || '').trim()).toLowerCase());
 const isFav = i => shared.favorites.some(f => f.key === keyOf(i));
 function mini(text, title, onclick) { const b = document.createElement('button'); b.className = 'mini'; b.textContent = text; b.title = title; b.setAttribute('aria-label', title); b.onclick = onclick; return b; }
-function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites, playlists: r.playlists }; renderShared(); renderLibrary(); } }); }
+function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites || [], playlists: r.playlists || [], notes: r.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); } }); }
 function toggleFav(item) { socket.emit('fav:toggle', { item }, r => { if (!r?.ok) alert(r?.error || 'Could not update favorites.'); }); }
 function inviteToListen(item) {
   socket.emit('track:invite', { item }, r => {
@@ -434,13 +563,54 @@ function inviteToListen(item) {
     if (t) selectTrack(t, true); else $('#upload-status').textContent = `Sent to ${partner?.name || 'your partner'}.`;
   });
 }
+let playlistPendingItem = null;
+function closePlaylistPicker() { $('#playlist-picker').classList.add('hidden'); playlistPendingItem = null; }
 function addToPlaylist(item) {
-  if (!shared.playlists.length) return alert('Create a playlist first.');
-  const n = parseInt(prompt('Add to which playlist?\n' + shared.playlists.map((p, i) => `${i + 1}. ${p.name}`).join('\n')), 10);
-  const pl = shared.playlists[n - 1];
-  if (pl) socket.emit('playlist:add', { id: pl.id, item }, r => { if (!r?.ok) alert(r?.error); });
+  if (!socket?.connected) { $('#upload-status').textContent = 'Reconnecting… please try again in a moment.'; return; }
+  playlistPendingItem = item;
+  const track = item.trackId ? library.find(t => t.id === item.trackId) : item;
+  $('#playlist-picker-song').textContent = track ? `Song: ${track.title}${track.artist ? ' · ' + track.artist : ''}` : 'Choose where to save this song.';
+  $('#playlist-picker-status').textContent = '';
+  renderPlaylistPicker();
+  $('#playlist-picker').classList.remove('hidden');
 }
-function newPlaylist() { const name = (prompt('Playlist name') || '').trim(); if (name) socket.emit('playlist:create', { name }, r => { if (!r?.ok) alert(r?.error); }); }
+function renderPlaylistPicker() {
+  const box = $('#playlist-picker-options'); box.replaceChildren();
+  if (!shared.playlists.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'You don’t have a playlist yet. Create one below.'; box.append(p); return; }
+  shared.playlists.forEach(pl => {
+    const b = document.createElement('button'); b.className = 'playlist-choice';
+    const duplicate = playlistPendingItem && pl.items.some(x => x.key === keyOf(playlistPendingItem));
+    b.disabled = !!duplicate;
+    b.innerHTML = `<span></span><span></span>`;
+    b.children[0].textContent = pl.name;
+    b.children[1].textContent = duplicate ? 'Already added' : `${pl.items.length} songs · Add`;
+    b.onclick = () => {
+      if (!playlistPendingItem) return;
+      b.disabled = true; $('#playlist-picker-status').textContent = 'Adding song…';
+      socket.emit('playlist:add', { id: pl.id, item: playlistPendingItem }, r => {
+        if (!r?.ok) { $('#playlist-picker-status').textContent = r?.error || 'Could not add this song.'; b.disabled = false; return; }
+        $('#playlist-picker-status').textContent = `Added to “${pl.name}” ♥`;
+        refreshShared(); setTimeout(closePlaylistPicker, 650);
+      });
+    };
+    box.append(b);
+  });
+}
+function newPlaylist() {
+  const name = (prompt('Playlist name') || '').trim(); if (!name) return;
+  if (!socket?.connected) { alert('Reconnecting… please try again.'); return; }
+  socket.emit('playlist:create', { name }, r => {
+    if (!r?.ok) { alert(r?.error || 'Could not create playlist.'); return; }
+    refreshShared();
+    if (playlistPendingItem) {
+      socket.emit('playlist:add', { id: r.playlist.id, item: playlistPendingItem }, result => {
+        if (!result?.ok) { $('#playlist-picker-status').textContent = result?.error || 'Playlist created, but song was not added.'; return; }
+        $('#playlist-picker-status').textContent = `Created “${r.playlist.name}” and added the song ♥`;
+        refreshShared(); setTimeout(closePlaylistPicker, 700);
+      });
+    }
+  });
+}
 function playItems(items) {
   const ts = items.map(i => i.trackId && library.find(t => t.id === i.trackId)).filter(Boolean);
   if (!ts.length) { $('#upload-status').textContent = 'No playable tracks here yet.'; return; }
@@ -540,6 +710,9 @@ function renderSuggestBanner() {
   b.append(msg, row);
 }
 $('#btn-new-playlist').onclick = newPlaylist;
+$('#playlist-picker-close').onclick = closePlaylistPicker;
+$('#playlist-picker').addEventListener('click', e => { if (e.target.id === 'playlist-picker') closePlaylistPicker(); });
+$('#playlist-picker-create').onclick = newPlaylist;
 $('#tap-play').onclick = () => { playRetries = 0; player.play(); $('#tap-play').classList.add('hidden'); };
 $('#btn-suggest').onclick = () => {
   const title = $('#sug-title').value.trim(); if (!title) return alert('Enter the song title.');
@@ -589,4 +762,43 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
  document.querySelector('#theme-reset')?.addEventListener('click',()=>{save(themes.rose);preset?.querySelectorAll('.theme-chip').forEach(x=>x.classList.toggle('active',x.dataset.theme==='rose'));});
  const room=document.querySelector('#room-name');
  if(room){room.value=localStorage.getItem('syncpair-room-name')||'';room.addEventListener('input',()=>localStorage.setItem('syncpair-room-name',room.value));}
+})();
+
+
+// Extra playback tools: library search/sort, shuffle, repeat, volume, sleep timer and keyboard shortcuts.
+(function initPlaybackTools(){
+  const search = $('#library-search'), sort = $('#library-sort');
+  search?.addEventListener('input', renderLibrary);
+  sort?.addEventListener('change', renderLibrary);
+  const shuffle = $('#shuffle-toggle'), repeat = $('#repeat-toggle'), volume = $('#volume-control');
+  shuffleOn = localStorage.getItem('syncpair-shuffle') === '1';
+  repeatMode = localStorage.getItem('syncpair-repeat') || 'off';
+  function paintModes(){
+    shuffle?.classList.toggle('active', shuffleOn); shuffle?.setAttribute('aria-pressed', String(shuffleOn));
+    repeat?.classList.toggle('active', repeatMode !== 'off'); repeat?.setAttribute('aria-pressed', String(repeatMode !== 'off'));
+    if(shuffle) shuffle.textContent = shuffleOn ? '⤨ Shuffle: On' : '⤨ Shuffle';
+    if(repeat) repeat.textContent = repeatMode === 'one' ? '↻ Repeat: One' : repeatMode === 'all' ? '↻ Repeat: All' : '↻ Repeat: Off';
+  }
+  shuffle?.addEventListener('click',()=>{shuffleOn=!shuffleOn;localStorage.setItem('syncpair-shuffle',shuffleOn?'1':'0');paintModes();});
+  repeat?.addEventListener('click',()=>{repeatMode = repeatMode==='off'?'all':repeatMode==='all'?'one':'off';localStorage.setItem('syncpair-repeat',repeatMode);paintModes();});
+  paintModes();
+  if(volume){volume.value=localStorage.getItem('syncpair-volume')||'85';audio.volume=Number(volume.value)/100;volume.addEventListener('input',()=>{audio.volume=Number(volume.value)/100;localStorage.setItem('syncpair-volume',volume.value);});}
+  const timer=$('#sleep-timer'), status=$('#sleep-status');
+  function clearSleep(){sleepDeadline=0;sleepAtTrackEnd=false;if(sleepInterval){clearInterval(sleepInterval);sleepInterval=null;}if(timer)timer.value='0';if(status)status.textContent='';}
+  window.stopForSleep=function(){player.pause();broadcast('pause');clearSleep();if(status)status.textContent='Playback paused for your sleep timer.';};
+  timer?.addEventListener('change',()=>{
+    clearSleep();
+    if(timer.value==='end'){sleepAtTrackEnd=true;if(status)status.textContent='Will pause at the end of this track.';return;}
+    const mins=Number(timer.value);if(!mins)return;
+    sleepDeadline=Date.now()+mins*60000;
+    status.textContent=`Pauses in ${mins} min`;
+    sleepInterval=setInterval(()=>{const left=sleepDeadline-Date.now();if(left<=0){stopForSleep();return;}status.textContent=`Pauses in ${Math.ceil(left/60000)} min`;},15000);
+  });
+  document.addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea,select,[contenteditable="true"]') || e.altKey || e.ctrlKey || e.metaKey) return;
+    if(e.code==='Space'){e.preventDefault();togglePlay();}
+    else if(e.key==='ArrowLeft'&&player.track){player.seek(Math.max(0,player.pos()-5000));broadcast('seek');}
+    else if(e.key==='ArrowRight'&&player.track){player.seek(Math.min(player.duration()||Infinity,player.pos()+5000));broadcast('seek');}
+    else if(e.key.toLowerCase()==='m' && volume){audio.muted=!audio.muted;volume.value=audio.muted?'0':(localStorage.getItem('syncpair-volume')||'85');}
+  });
 })();

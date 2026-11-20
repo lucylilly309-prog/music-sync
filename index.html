@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <meta name="theme-color" content="#160f1c"/>
-  <title>SyncPair — listen together</title>
+  <meta name="theme-color" content="#100d16"/>
+  <title>SyncPair — your little universe</title>
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
@@ -51,6 +51,10 @@
       <div class="row between"><div><h3>Your shared library</h3><p class="dim small">Upload audio you have the right to share. Both phones use this library.</p></div><span id="track-count" class="pill">0 tracks</span></div>
       <label class="file-label" for="audio-file">＋ Add music files</label>
       <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm" multiple hidden/>
+      <div class="library-tools">
+        <input id="library-search" type="search" placeholder="⌕ Search songs or artists…" aria-label="Search music library"/>
+        <select id="library-sort" aria-label="Sort music library"><option value="added">Recently added</option><option value="title">Title A–Z</option><option value="artist">Artist A–Z</option><option value="duration">Longest first</option></select>
+      </div>
       <p id="upload-status" class="dim small" aria-live="polite"></p>
       <div id="library-list" class="library-list"></div>
     </section>
@@ -66,18 +70,26 @@
     <section class="card"><div class="row between"><h3>Playlists</h3><button id="btn-new-playlist">＋ New</button></div><div id="playlist-list" class="library-list"></div></section>
     <div class="card now-card">
       <h3 class="dim">Now playing on your device</h3>
+      <div id="embed-wrap" class="hidden"><iframe id="embed-frame" title="Shared link player" allow="autoplay; encrypted-media; fullscreen"></iframe></div>
       <div class="row"><div id="me-art" class="art"></div><div class="track-info"><h3 id="me-title">Choose a track</h3><p class="dim" id="me-artist">Add music to your library to begin.</p></div></div>
       <div class="bar"><div id="me-prog" class="bar-fill"></div></div>
       <input id="me-seek" class="seek" type="range" min="0" max="1000" value="0" aria-label="Seek playback position"/>
       <div class="row between"><span id="me-time" class="dim small">0:00</span><span id="me-duration" class="dim small">0:00</span></div>
       <div class="transport"><button id="me-prev" aria-label="Previous track">⏮</button><button id="me-play" class="primary" aria-label="Play">▶</button><button id="me-next" aria-label="Next track">⏭</button></div>
+      <div class="player-extras">
+        <button id="shuffle-toggle" class="mini" aria-pressed="false" title="Shuffle">⤨ Shuffle</button>
+        <button id="repeat-toggle" class="mini" aria-pressed="false" title="Repeat mode">↻ Repeat: Off</button>
+        <label class="volume-control">Volume <input id="volume-control" type="range" min="0" max="100" value="85" aria-label="Volume"/></label>
+      </div>
+      <div class="sleep-row"><label for="sleep-timer">Sleep timer</label><select id="sleep-timer"><option value="0">Off</option><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60">1 hour</option><option value="end">At end of track</option></select><span id="sleep-status" class="dim small" aria-live="polite"></span></div>
+      <p class="dim small keyboard-hint">Shortcuts: Space play/pause · ← / → seek 5 sec · M mute</p>
       <p id="player-status" class="dim small" aria-live="polite">Select a track to play.</p>
     </div>
     <div id="invite-banner" class="card hidden"></div>
   </section>
 
   <section id="screen-session" class="screen hidden">
-    <div id="art-wrap"><div id="sess-art" class="art big"></div><div id="floaters"></div></div>
+    <div id="floaters" aria-hidden="true"></div>
     <h2 id="sess-title">—</h2><p class="dim" id="sess-artist"></p>
     <div class="bar"><div id="sess-prog" class="bar-fill"></div></div>
     <input id="sess-seek" class="seek" type="range" min="0" max="1000" value="0" aria-label="Seek playback position"/>
@@ -88,7 +100,15 @@
     <div class="row"><input id="chat-inp" placeholder="Say something…" maxlength="500"/><button id="chat-send">Send</button></div>
     <button id="btn-leave" class="danger">Leave session</button>
   </section>
-  <div id="embed-wrap" class="hidden"><iframe id="embed-frame" title="Shared link player" allow="autoplay; encrypted-media; fullscreen"></iframe></div>
+  <div id="playlist-picker" class="playlist-picker hidden" role="dialog" aria-modal="true" aria-labelledby="playlist-picker-title">
+    <div class="playlist-picker-card">
+      <div class="row between"><h3 id="playlist-picker-title">Add to a playlist</h3><button id="playlist-picker-close" class="mini" aria-label="Close">✕</button></div>
+      <p class="dim small" id="playlist-picker-song"></p>
+      <div id="playlist-picker-options" class="playlist-picker-options"></div>
+      <button id="playlist-picker-create" class="primary">＋ Create a new playlist</button>
+      <p id="playlist-picker-status" class="dim small" aria-live="polite"></p>
+    </div>
+  </div>
   <button id="tap-play" class="primary hidden">▶ Tap to start playing</button>
   <div id="other-panel" class="card hidden"><p id="other-text" class="small"></p><a id="other-open" class="mini" target="_blank" rel="noopener noreferrer">Open in app</a></div>
 </main>

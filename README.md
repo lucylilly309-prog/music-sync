@@ -154,3 +154,8 @@ Both clients load `/embed.html` (YouTube/Spotify/SoundCloud bridge); Flutter use
 - Basic server startup and `/health` smoke test passed.
 
 **Important:** the account tokens in the original archive were exposed. Hashing protects storage going forward, but it does not revoke a token already copied from the old archive. Treat the old archive as compromised and use a fresh account pair if the old ZIP has been shared.
+
+
+## Partner profile notes
+
+Paired users can leave short (up to 280-character) notes on the partner profile wall. Notes sync in real time through Socket.IO, persist in the pair's shared data, and remain separate from shared listening-session chat. Authors can remove their own notes.
