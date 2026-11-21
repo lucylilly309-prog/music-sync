@@ -190,7 +190,7 @@ const partnerOf = uid => { const u = users.get(uid); return u?.partnerId ? users
 const canSee = (uid, t) => !!t && !!t.uploadedBy && (t.uploadedBy === uid || partnerOf(uid)?.id === t.uploadedBy);
 const visibleTrack = (uid, id) => { const t = id ? tracks.get(String(id)) : null; return canSee(uid, t) ? t : null; };
 const pubTrack = (t, uid) => { if (!t) return t; const { hash, uploadedBy, ...pub } = t; if (uid) pub.mine = uploadedBy === uid; return pub; };
-const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [] });
+const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [], roomName: pr.data.roomName || '' });
 const notifyPartner = (uid, event) => { const p = partnerOf(uid); if (p) io.to('user:' + p.id).emit(event); };
 const notifyLibrary = uid => { io.to('user:' + uid).emit('library:changed'); notifyPartner(uid, 'library:changed'); };
 // Push the couple's shared lists (and each person's history) after a change made outside a socket handler.
@@ -363,6 +363,13 @@ io.on('connection', socket => {
     saveData(); io.to('user:' + me.id).emit('recent:update', { recent: me.recent }); ack({ ok: true });
   });
   limited('recent:clear', 5, 60_000, (_p, ack = () => {}) => { me.recent = []; saveData(); io.to('user:' + me.id).emit('recent:update', { recent: [] }); ack({ ok: true }); });
+  limited('room:set', 20, 60_000, (payload = {}, ack = () => {}) => {
+    const pr = pairOf(me.id);
+    if (!pr) return ack(NEED_PAIR);
+    pr.data.roomName = String(payload.name || '').trim().slice(0, 40);
+    pushShared(pr);
+    ack({ ok: true });
+  });
   socket.on('shared:get', (_p, ack = () => {}) => { const pr = pairOf(me.id); ack(pr ? { ok: true, ...sharedPayload(pr) } : NEED_PAIR); });
   limited('fav:toggle', 30, 60_000, (p = {}, ack = () => {}) => {
     const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);

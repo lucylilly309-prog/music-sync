@@ -3,6 +3,10 @@ const $ = selector => document.querySelector(selector);
 const ICONS = {
   play: 'M8 5v14l11-7z', pause: 'M6 5h4v14H6zm8 0h4v14h-4z', prev: 'M6 6h2v12H6zm3.5 6L18 18V6z', next: 'M16 6h2v12h-2zM6 18l8.5-6L6 6z',
   home: 'M12 3 3 11h2v9h5v-6h4v6h5v-9h2z', music: 'M12 3v10.55A4 4 0 1 0 14 17V7h4V3z', heart: 'M12 21s-8-4.9-9.6-9.7C1 7.700 3.400 4.500 6.600 4.500c2 0 3.700 1.100 5.400 3.100 1.700-2 3.400-3.100 5.400-3.100 3.200 0 5.600 3.200 4.200 6.800C20 16.100 12 21 12 21z',
+  plus: 'M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z', send: 'M2 21l21-9L2 3v7l15 2-15 2z',
+  edit: 'M3 17.25V21h3.75L17.8 9.94l-3.75-3.75zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75z',
+  trash: 'M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z',
+  more: 'M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',
   spark: 'M12 2l2.4 6.6L21 11l-6.600 2.400L12 20l-2.400-6.600L3 11l6.600-2.400z'
 };
 const icon = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
@@ -14,7 +18,7 @@ let library = [], serverOffset = 0, isApplyingRemote = false;
 let seekDragging = false, lastLocalControlAt = 0;
 let lastCorrection = 0, wantPlaying = false, lastPlayCmd = 0, playRetries = 0;
 let recent = [], lastRecent = { id: null, at: 0 };
-let shared = { favorites: [], playlists: [], notes: [] }, queue = null, pendingItem = null, suggestion = null;
+let shared = { favorites: [], playlists: [], notes: [], roomName: '' }, queue = null, pendingItem = null, suggestion = null;
 let shuffleOn = false, repeatMode = 'off', sleepDeadline = 0, sleepAtTrackEnd = false, sleepInterval = null;
 let noteDraft = ''; // text typed in the note box; survives re-renders of the partner card
 
@@ -212,7 +216,7 @@ function connectMine(token) {
   socket.on('connect', () => { refreshShared(); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
   socket.on('library:changed', () => refreshLibrary().catch(() => {}));
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
-  socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); });
+  socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [], roomName: st.roomName || '' }; renderShared(); renderLibrary(); renderPartnerCard(); });
   socket.on('track:suggest', s => { suggestion = s; renderSuggestBanner(); });
   socket.on('connect_error', err => {
     // The server no longer knows this token (data reset, or a different server). Retrying can never work, so
@@ -431,14 +435,14 @@ function renderLibrary() {
     play.onclick = () => { queue = null; selectTrack(track, true); };
     const actions = document.createElement('div'); actions.className = 'row-actions';
     const item = { trackId: track.id };
-    actions.append(
-      mini(isFav(item) ? '♥' : '♡', 'Favorite together', () => toggleFav(item)),
-      mini('＋', 'Add to playlist', () => addToPlaylist(item)),
-      mini('📨', 'Invite partner to listen', () => inviteToListen(item)),
-      mini('✎', 'Edit title and artist', () => editTrack(track)),
-      ...(track.mine ? [mini('🗑', 'Delete song', () => deleteTrack(track))] : []),
-      play);
-    row.append(thumb, details, actions); list.append(row);
+    const menu = document.createElement('div'); menu.className = 'row-more hidden';
+    const item2 = (name, label, fn) => { const b = document.createElement('button'); b.className = 'mini wide'; b.innerHTML = icon(name) + '<span></span>'; b.lastChild.textContent = label; b.onclick = () => { menu.classList.add('hidden'); fn(); }; return b; };
+    menu.append(item2('plus', 'Playlist', () => addToPlaylist(item)), item2('send', 'Invite', () => inviteToListen(item)), item2('edit', 'Edit', () => editTrack(track)), ...(track.mine ? [item2('trash', 'Delete', () => deleteTrack(track))] : []));
+    const more = mini('more', 'More actions', () => { const open = menu.classList.toggle('hidden'); more.setAttribute('aria-expanded', String(!open)); });
+    more.setAttribute('aria-expanded', 'false');
+    actions.append(mini(isFav(item) ? '♥' : '♡', 'Favorite together', () => toggleFav(item)), more, play);
+    row.classList.add('has-menu');
+    row.append(thumb, details, actions, menu); list.append(row);
   });
 }
 async function refreshLibrary() {
@@ -657,8 +661,8 @@ $('#chat-send').onclick = sendChat; $('#chat-inp').addEventListener('keydown', e
 // ---- Favorites, playlists, invitations, sharing from any player ----
 const keyOf = i => i.trackId || ('ext:' + ((i.title || '').trim() + '|' + (i.artist || '').trim()).toLowerCase());
 const isFav = i => shared.favorites.some(f => f.key === keyOf(i));
-function mini(text, title, onclick) { const b = document.createElement('button'); b.className = 'mini'; b.textContent = text; b.title = title; b.setAttribute('aria-label', title); b.onclick = onclick; return b; }
-function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites || [], playlists: r.playlists || [], notes: r.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); } }); }
+function mini(text, title, onclick) { const b = document.createElement('button'); b.className = 'mini'; if (ICONS[text]) b.innerHTML = icon(text); else b.textContent = text; b.title = title; b.setAttribute('aria-label', title); b.onclick = onclick; return b; }
+function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites || [], playlists: r.playlists || [], notes: r.notes || [], roomName: r.roomName || '' }; renderShared(); renderLibrary(); renderPartnerCard(); } }); }
 function toggleFav(item) { socket.emit('fav:toggle', { item }, r => { if (!r?.ok) notify(r?.error || 'Could not update favorites.'); }); }
 function inviteToListen(item) {
   socket.emit('track:invite', { item }, r => {
@@ -777,7 +781,7 @@ function itemRow(item, extra = []) {
     actions.append(mini('🎧', 'Listen together', () => listenTogether(item)));
     if (item.link) { const l = document.createElement('a'); l.href = item.link; l.target = '_blank'; l.rel = 'noopener noreferrer'; l.textContent = '↗'; l.className = 'mini'; actions.append(l); }
   }
-  actions.append(mini('📨', 'Invite partner', () => inviteToListen(item)), ...extra);
+  actions.append(mini('send', 'Invite partner', () => inviteToListen(item)), ...extra);
   row.append(thumb, info, actions); return row;
 }
 // Records a song in "Recently played" once per listen (not on every pause/resume).
@@ -797,7 +801,13 @@ function renderRecent() {
     box.append(itemRow(item, [mini(faved ? '♥' : '♡', faved ? 'Remove from favorites' : 'Add to favorites', () => toggleFav(item))]));
   });
 }
+function syncRoomName() {
+  const room = $('#room-name'), title = $('#room-title'), name = shared.roomName || '';
+  if (room && document.activeElement !== room) room.value = name;
+  if (title) title.textContent = name;
+}
 function renderShared() {
+  syncRoomName();
   renderRecent();
   const fl = $('#fav-list'); fl.replaceChildren();
   if (!shared.favorites.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'Tap ♡ on a song to save it for both of you.'; fl.append(p); }
@@ -887,8 +897,8 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
   preset?.querySelectorAll('.theme-chip').forEach(x=>x.classList.remove('active'));
  }));
  document.querySelector('#theme-reset')?.addEventListener('click',()=>{save(themes.rose);preset?.querySelectorAll('.theme-chip').forEach(x=>x.classList.toggle('active',x.dataset.theme==='rose'));});
- const room=document.querySelector('#room-name');
- if(room){room.value=localStorage.getItem('syncpair-room-name')||'';room.addEventListener('input',()=>localStorage.setItem('syncpair-room-name',room.value));}
+ const room=document.querySelector('#room-name'); let roomTimer=null;
+ if(room)room.addEventListener('input',()=>{shared.roomName=room.value.trim();syncRoomName();clearTimeout(roomTimer);roomTimer=setTimeout(()=>socket?.emit('room:set',{name:room.value},r=>{if(r&&!r.ok)notify(r.error||'Could not save the room name.');}),500);});
 })();
 
 

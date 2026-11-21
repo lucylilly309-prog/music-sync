@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="SyncPair"/>
-  <link rel="stylesheet" href="style.css?v=18"/>
+  <link rel="stylesheet" href="style.css?v=20"/>
 </head>
 <body>
 <main>
@@ -51,7 +51,7 @@
         </div>
       </details>
       <label for="room-name">Room name</label><input id="room-name" placeholder="e.g. our little universe" maxlength="40"/>
-      <p class="dim small">Room name stays on this device.</p>
+      <p class="dim small">Your partner sees this name too.</p>
     </section>
     <div id="partner-card" class="card"><p class="dim">Waiting for your partner…</p></div>
     <section class="card library-card">
@@ -122,6 +122,6 @@
 </main>
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <audio id="audio-player" preload="metadata"></audio>
-<script src="/socket.io/socket.io.js"></script><script src="app.js?v=18"></script>
+<script src="/socket.io/socket.io.js"></script><script src="app.js?v=20"></script>
 </body>
 </html>

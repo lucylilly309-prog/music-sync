@@ -188,3 +188,9 @@ details[open]>summary::after{transform:rotate(90deg)}
 :root[data-motion=off] *,:root[data-motion=off] *::before{animation:none!important;transition:none!important}
 @media(prefers-reduced-motion:reduce){*,*::before{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 @media(max-width:420px){.library-tools{grid-template-columns:1fr}.volume-control{width:100%;justify-content:center}}
+
+/* row overflow menu */
+.library-row>.row-actions{grid-column:auto;flex-wrap:nowrap;padding:0}
+.library-row .row-more{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 2px 56px}
+.mini.wide{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;min-height:36px}
+.mini[aria-expanded=true]{background:color-mix(in srgb,var(--accent) 26%,var(--surface2));border-color:var(--accent)}
