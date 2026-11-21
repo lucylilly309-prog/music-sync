@@ -194,3 +194,7 @@ details[open]>summary::after{transform:rotate(90deg)}
 .library-row .row-more{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 2px 56px}
 .mini.wide{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;min-height:36px}
 .mini[aria-expanded=true]{background:color-mix(in srgb,var(--accent) 26%,var(--surface2));border-color:var(--accent)}
+
+/* nothing decorative may sit on top of the video */
+.now-card::before,.now-card::after,#embed-wrap::before,#embed-wrap::after{content:none!important}
+#embed-wrap{isolation:isolate}

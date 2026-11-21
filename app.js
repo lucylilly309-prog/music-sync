@@ -100,6 +100,7 @@ function placeEmbed(restoreAfterMove = true) {
 function showLinkUI(track) {
   const wrap = $('#embed-wrap'), other = $('#other-panel');
   wrap.classList.toggle('hidden', !isEmbed(track));
+  $('#sess-art')?.classList.toggle('hidden', isEmbed(track)); // the video replaces the cover art
   wrap.classList.toggle('spotify', track?.provider === 'spotify');
   wrap.classList.toggle('soundcloud', track?.provider === 'soundcloud');
   wrap.classList.toggle('interactive', track?.provider === 'spotify'); // Spotify needs one tap inside its own player
@@ -572,7 +573,7 @@ async function applyControl(control) {
   const position = control.positionMs + (moving ? elapsed : 0);
   try {
     if (player.track?.id !== track.id) await player.load(track, position, false);
-    else player.seek(position);
+    player.seek(control.positionMs + (moving ? Math.max(0, Date.now() + serverOffset - control.serverTime) : 0));
     if (control.type === 'pause') player.pause();
     else if (moving) await player.play();
     lastControl = control;
@@ -605,7 +606,10 @@ function updateProgress() {
   $('#me-time').textContent = fmt(pos); $('#sess-time').textContent = `${fmt(pos)} / ${fmt(duration)}`;
   if (!seekDragging) { const value = duration > 0 ? Math.round(pos / duration * 1000) : 0; $('#me-seek').value = value; $('#sess-seek').value = value; }
 }
+audio.preload = 'auto';
 audio.addEventListener('timeupdate', updateProgress);
+audio.addEventListener('waiting', () => { if (player.track && !isLinkTrack(player.track)) $('#session-status').textContent = 'Buffering…'; });
+audio.addEventListener('playing', () => { if (session) $('#session-status').textContent = 'Synced listening session'; });
 setInterval(() => { if (isLinkTrack(player.track)) updateProgress(); }, 500);
 audio.addEventListener('play', () => { renderPlayer(); });
 audio.addEventListener('pause', () => { renderPlayer(); });
@@ -616,10 +620,10 @@ audio.addEventListener('error', () => { if (player.track) $('#player-status').te
 setInterval(() => {
   // Browsers refuse to auto-play until the person has tapped/clicked this page at least once (e.g. after a reload).
   const noGesture = !!navigator.userActivation && !navigator.userActivation.hasBeenActive;
-  const waiting = isEmbed(player.track) && wantPlaying && !player.playing;
+  const waiting = !!player.track && !isVirtual(player.track) && wantPlaying && !player.playing;
   const stalled = waiting && Date.now() - lastPlayCmd > 2500;
   if (player.playing) playRetries = 0;
-  if (stalled && !noGesture && playRetries < 3) { playRetries++; lastPlayCmd = Date.now(); embedSend({ t: 'play' }); safeLog(`↻ player was not playing, retrying (${playRetries}/3)`); }
+  if (stalled && !noGesture && playRetries < 3) { playRetries++; lastPlayCmd = Date.now(); if (isEmbed(player.track)) embedSend({ t: 'play' }); else audio.play().catch(() => {}); safeLog(`↻ player was not playing, retrying (${playRetries}/3)`); }
   $('#tap-play').classList.toggle('hidden', !(waiting && (noGesture || playRetries >= 1))); // a real tap always unlocks playback
   if (session && player.playing && lastControl && lastControl.type !== 'pause') {
     const expected = lastControl.positionMs + Math.max(0, Date.now() + serverOffset - lastControl.serverTime);

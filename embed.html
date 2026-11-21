@@ -25,7 +25,7 @@
     var p = null, ready = false, timer = null;
     function create(ref) {
       var d = document.createElement('div'); d.id = 'ytp'; stage.innerHTML = ''; stage.appendChild(d);
-      p = new YT.Player('ytp', { width: '100%', height: '100%', videoId: ref, playerVars: { playsinline: 1, rel: 0, controls: 0, disablekb: 1 }, events: {
+      p = new YT.Player('ytp', { width: '100%', height: '100%', videoId: ref, playerVars: { playsinline: 1, rel: 0, controls: 0, disablekb: 1, modestbranding: 1, iv_load_policy: 3, fs: 0, cc_load_policy: 0 }, events: {
         onReady: function () { ready = true; timer = setInterval(poll, 400); if (cfg.start > 0) p.seekTo(cfg.start / 1000, true); if (cfg.auto) p.playVideo(); markReady(); },
         onStateChange: function (e) { if (e.data === 0) emit({ t: 'ended' }); poll(); },
         onError: function () { emit({ t: 'error', msg: 'This video cannot be played in an embedded player.' }); } } });
