@@ -5,7 +5,7 @@ const me = { id: null, name: '', token: null, code: null };
 let socket = null, partner = null, partnerState = null, partnerOnline = false;
 let session = null, pendingInvite = null, lastControl = null;
 let library = [], serverOffset = 0, isApplyingRemote = false;
-let seekDragging = false;
+let seekDragging = false, lastLocalControlAt = 0;
 let lastCorrection = 0, wantPlaying = false, lastPlayCmd = 0, playRetries = 0;
 let recent = [], lastRecent = { id: null, at: 0 };
 let shared = { favorites: [], playlists: [], notes: [] }, queue = null, pendingItem = null, suggestion = null;
@@ -35,7 +35,7 @@ window.addEventListener('message', e => {
     // Ignore spurious "ended" (seek past the end, a player reload): only skip when the song really reached its end.
     const d = player.duration();
     wantPlaying = false;
-    if (!isApplyingRemote && d > 0 && player.pos() >= d - 3000) { safeLog('⏭ track ended, playing next'); skip(1); }
+    if (!isApplyingRemote && d > 0 && player.pos() >= d - 3000) { safeLog('⏭ track ended, playing next'); autoAdvance(); }
     else safeLog('ignored a false “ended” from the player');
   }
   else if (m.t === 'error') { $('#player-status').textContent = m.msg; $('#session-status').textContent = m.msg; }
@@ -192,6 +192,7 @@ async function createAccount(name) {
 function connectMine(token) {
   socket = io({ auth: { token } });
   socket.on('connect', () => { refreshShared(); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
+  socket.on('library:changed', () => refreshLibrary().catch(() => {}));
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
   socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); });
   socket.on('track:suggest', s => { suggestion = s; renderSuggestBanner(); });
@@ -362,6 +363,8 @@ function renderLibrary() {
       mini(isFav(item) ? '♥' : '♡', 'Favorite together', () => toggleFav(item)),
       mini('＋', 'Add to playlist', () => addToPlaylist(item)),
       mini('📨', 'Invite partner to listen', () => inviteToListen(item)),
+      mini('✎', 'Edit title and artist', () => editTrack(track)),
+      ...(track.mine ? [mini('🗑', 'Delete song', () => deleteTrack(track))] : []),
       play);
     row.append(details, actions); list.append(row);
   });
@@ -370,6 +373,26 @@ async function refreshLibrary() {
   if (!me.token) return;
   const response = await fetch('/api/library', { headers: { Authorization: 'Bearer ' + me.token } }); if (!response.ok) throw new Error('Could not load music library.');
   library = await response.json(); renderLibrary();
+  const cur = player.track && !player.track.provider ? library.find(t => t.id === player.track.id) : null;
+  if (cur) { player.track.title = cur.title; player.track.artist = cur.artist; renderPlayer(true); }
+}
+async function libraryRequest(track, method, body) {
+  const response = await fetch('/api/library/' + encodeURIComponent(track.id), { method, headers: { Authorization: 'Bearer ' + me.token, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Request failed.'); return data;
+}
+async function editTrack(track) {
+  const title = prompt('Song title', track.title); if (title === null) return;
+  const artist = prompt('Artist', track.artist === 'Unknown artist' ? '' : track.artist); if (artist === null) return;
+  try { await libraryRequest(track, 'PATCH', { title, artist }); await refreshLibrary(); } catch (error) { $('#upload-status').textContent = error.message; }
+}
+async function deleteTrack(track) {
+  if (!confirm(`Delete “${track.title}” for both of you? This also removes it from favorites and playlists.`)) return;
+  try {
+    await libraryRequest(track, 'DELETE');
+    if (queue) queue = queue.filter(t => t.id !== track.id);
+    if (player.track?.id === track.id) player.pause();
+    await refreshLibrary(); $('#upload-status').textContent = `Deleted ${track.title}.`;
+  } catch (error) { $('#upload-status').textContent = error.message; }
 }
 async function inspectDuration(file) {
   const url = URL.createObjectURL(file); const probe = new Audio(); probe.preload = 'metadata'; probe.src = url;
@@ -420,6 +443,20 @@ async function skip(direction) {
   } else next = (index < 0 ? 0 : (index + direction + list.length) % list.length);
   await selectTrack(list[next], true);
 }
+// When a song ends during a session, both phones used to advance on their own. With shuffle on they picked
+// different random songs and then swapped tracks with each other. Now only the session leader (whoever
+// started it) advances and tells the partner; the follower steps in only if nothing arrives.
+function autoAdvance() {
+  if (!session || session.a === me.id) return skip(1);
+  const ended = player.track?.id;
+  setTimeout(() => { if (session && player.track?.id === ended && !player.playing) skip(1); }, 3500);
+}
+// The README promises a leader heartbeat; nothing sent it. It keeps both clocks anchored and lets a phone that
+// missed a command (brief disconnect, locked screen) catch up on its own.
+setInterval(() => {
+  if (!session || session.a !== me.id || !socket?.connected || !player.track || !player.playing) return;
+  socket.emit('session:control', { type: 'sync', trackId: player.track.id, track: linkMeta(), positionMs: Math.round(player.pos()), isPlaying: true });
+}, 5000);
 function publishState() {
   if (!player.track || !socket?.connected) return;
   socket.emit('state:update', { trackId: player.track.id, track: linkMeta(), positionMs: Math.round(player.pos()), isPlaying: player.playing });
@@ -429,6 +466,7 @@ function broadcast(type) {
   const payload = { type, trackId: player.track.id, track: linkMeta(), positionMs: Math.round(player.pos()) };
   publishState();
   if (session && socket?.connected) {
+    lastLocalControlAt = Date.now();
     lastControl = { ...payload, serverTime: Date.now() + serverOffset };
     socket.emit('session:control', payload);
   }
@@ -449,17 +487,18 @@ async function applyControl(control) {
   if (!track?.url && !track?.provider) { $('#session-status').textContent = 'This track is not in the shared library on this server.'; return; }
   if (control.type === 'sync' && player.track?.id === track.id) { // heartbeat: update reference clock only
     lastControl = control;
-    if (control.isPlaying && !player.playing && !wantPlaying) { try { await player.play(); } catch {} }
+    if (control.isPlaying && !player.playing && !wantPlaying && Date.now() - lastLocalControlAt > 2500) { try { await player.play(); } catch {} } // not right after the user's own pause
     return;
   }
   isApplyingRemote = true;
   const elapsed = Math.max(0, Date.now() + serverOffset - control.serverTime);
-  const position = control.positionMs + (control.type === 'play' || control.type === 'skip' ? elapsed : 0);
+  const moving = control.type === 'play' || control.type === 'skip' || (control.type === 'sync' && control.isPlaying);
+  const position = control.positionMs + (moving ? elapsed : 0);
   try {
     if (player.track?.id !== track.id) await player.load(track, position, false);
     else player.seek(position);
     if (control.type === 'pause') player.pause();
-    else if (control.type === 'play' || control.type === 'skip') await player.play();
+    else if (moving) await player.play();
     lastControl = control;
     $('#session-status').textContent = `Synced with ${control.fromName || 'your partner'}.`;
     safeLog(`↔ ${control.type}: ${track.title} · ${fmt(position)}`);
@@ -495,7 +534,7 @@ setInterval(() => { if (isLinkTrack(player.track)) updateProgress(); }, 500);
 audio.addEventListener('play', () => { renderPlayer(); });
 audio.addEventListener('pause', () => { renderPlayer(); });
 audio.addEventListener('loadedmetadata', renderPlayer);
-audio.addEventListener('ended', () => { if (sleepAtTrackEnd) { stopForSleep(); return; } if (!isApplyingRemote) skip(1); });
+audio.addEventListener('ended', () => { if (sleepAtTrackEnd) { stopForSleep(); return; } if (!isApplyingRemote) autoAdvance(); });
 audio.addEventListener('error', () => { if (player.track) $('#player-status').textContent = 'Audio could not be played. Try converting it to MP3 or AAC.'; });
 
 setInterval(() => {
@@ -506,7 +545,7 @@ setInterval(() => {
   if (player.playing) playRetries = 0;
   if (stalled && !noGesture && playRetries < 3) { playRetries++; lastPlayCmd = Date.now(); embedSend({ t: 'play' }); safeLog(`↻ player was not playing, retrying (${playRetries}/3)`); }
   $('#tap-play').classList.toggle('hidden', !(waiting && (noGesture || playRetries >= 1))); // a real tap always unlocks playback
-  if (session && player.playing && lastControl) {
+  if (session && player.playing && lastControl && lastControl.type !== 'pause') {
     const expected = lastControl.positionMs + Math.max(0, Date.now() + serverOffset - lastControl.serverTime);
     const drift = expected - player.pos();
     if (Math.abs(drift) > (isLinkTrack(player.track) ? 2000 : 750) && Date.now() - lastCorrection > 5000) { lastCorrection = Date.now(); player.seek(expected); safeLog(`↻ corrected playback drift (${Math.round(drift)} ms)`); }
@@ -611,9 +650,20 @@ function newPlaylist() {
     }
   });
 }
-function playItems(items) {
-  const ts = items.map(i => i.trackId && library.find(t => t.id === i.trackId)).filter(Boolean);
+// A playlist can mix uploaded songs and shared links. Link songs with an embedded player (YouTube, Spotify,
+// SoundCloud) or a direct audio URL play too; "open in another app" songs have no end event, so they cannot
+// sit in an auto-advancing queue and are skipped here (they still have their own 🎧 button).
+function playableFromItem(item) {
+  if (item.trackId) return library.find(t => t.id === item.trackId) || null;
+  if (item.provider && item.provider !== 'other' && item.linkId) return trackFromItem(item);
+  return item.provider ? null : (findInLibrary(item) || null);
+}
+function playItems(items, { shuffle = false } = {}) {
+  const ts = items.map(playableFromItem).filter(Boolean);
   if (!ts.length) { $('#upload-status').textContent = 'No playable tracks here yet.'; return; }
+  if (shuffle) for (let i = ts.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ts[i], ts[j]] = [ts[j], ts[i]]; }
+  const skipped = items.length - ts.length;
+  if (skipped > 0) $('#upload-status').textContent = `Playing ${ts.length} of ${items.length} songs (${skipped} can only be opened in another app).`;
   queue = ts; selectTrack(ts[0], true);
 }
 const norm = s => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
@@ -655,8 +705,8 @@ function itemRow(item, extra = []) {
   const a = document.createElement('p'); a.className = 'dim small'; a.textContent = item.artist || (item.trackId ? '' : 'Shared from another player');
   info.append(t, a);
   const actions = document.createElement('div'); actions.className = 'row-actions';
-  if (item.trackId) actions.append(mini('▶', 'Play', () => playItems([item])));
-  else {
+  if (item.trackId || (item.provider && item.provider !== 'other')) actions.append(mini('▶', 'Play', () => playItems([item])));
+  if (!item.trackId) {
     actions.append(mini('🎧', 'Listen together', () => listenTogether(item)));
     if (item.link) { const l = document.createElement('a'); l.href = item.link; l.target = '_blank'; l.rel = 'noopener noreferrer'; l.textContent = '↗'; l.className = 'mini'; actions.append(l); }
   }
@@ -685,14 +735,24 @@ function renderShared() {
   const fl = $('#fav-list'); fl.replaceChildren();
   if (!shared.favorites.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'Tap ♡ on a song to save it for both of you.'; fl.append(p); }
   shared.favorites.forEach(f => fl.append(itemRow(f, [mini('✕', 'Remove from favorites', () => toggleFav(f))])));
-  const pl = $('#playlist-list'); pl.replaceChildren();
+  const pl = $('#playlist-list');
+  const wasOpen = new Set([...pl.querySelectorAll('details[open]')].map(d => d.dataset.id)); // a refresh must not collapse what you are editing
+  pl.replaceChildren();
   if (!shared.playlists.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'No playlists yet.'; pl.append(p); }
   shared.playlists.forEach(p => {
-    const d = document.createElement('details'); const s = document.createElement('summary'); s.textContent = `${p.name} (${p.items.length})`; d.append(s);
+    const d = document.createElement('details'); d.dataset.id = p.id; d.open = wasOpen.has(p.id);
+    const s = document.createElement('summary'); s.textContent = `${p.name} (${p.items.length})`; d.append(s);
     const bar = document.createElement('div'); bar.className = 'row-actions';
-    bar.append(mini('▶ Play', 'Play playlist', () => playItems(p.items)), mini('🗑', 'Delete playlist', () => { if (confirm(`Delete “${p.name}”?`)) socket.emit('playlist:delete', { id: p.id }); }));
+    bar.append(
+      mini('▶ Play', 'Play playlist', () => playItems(p.items)),
+      mini('🔀', 'Shuffle play', () => playItems(p.items, { shuffle: true })),
+      mini('✎', 'Rename playlist', () => { const name = (prompt('Playlist name', p.name) || '').trim(); if (name && name !== p.name) socket.emit('playlist:rename', { id: p.id, name }, r => { if (!r?.ok) alert(r?.error || 'Could not rename.'); }); }),
+      mini('🗑', 'Delete playlist', () => { if (confirm(`Delete “${p.name}”?`)) socket.emit('playlist:delete', { id: p.id }); }));
     d.append(bar);
-    p.items.forEach(i => d.append(itemRow(i, [mini('✕', 'Remove from playlist', () => socket.emit('playlist:remove', { id: p.id, key: i.key }))])));
+    p.items.forEach((i, n) => d.append(itemRow(i, [
+      ...(n > 0 ? [mini('▲', 'Move up', () => socket.emit('playlist:move', { id: p.id, key: i.key, direction: -1 }))] : []),
+      ...(n < p.items.length - 1 ? [mini('▼', 'Move down', () => socket.emit('playlist:move', { id: p.id, key: i.key, direction: 1 }))] : []),
+      mini('✕', 'Remove from playlist', () => socket.emit('playlist:remove', { id: p.id, key: i.key }))])));
     pl.append(d);
   });
 }
@@ -801,4 +861,106 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
     else if(e.key==='ArrowRight'&&player.track){player.seek(Math.min(player.duration()||Infinity,player.pos()+5000));broadcast('seek');}
     else if(e.key.toLowerCase()==='m' && volume){audio.muted=!audio.muted;volume.value=audio.muted?'0':(localStorage.getItem('syncpair-volume')||'85');}
   });
+})();
+
+
+// ---- Home navigation: bottom tabs + persistent mini-player (the player used to sit at the bottom of one long scroll) ----
+(function initHomeTabs() {
+  const home = $('#screen-home'); if (!home) return;
+  const top = el => el?.closest('#screen-home > *');
+  const nowCard = $('.now-card'), partnerCard = $('#partner-card');
+  if (nowCard && partnerCard) partnerCard.after(nowCard); // the player is the hero: right under your partner
+  const groups = {
+    home: [partnerCard, nowCard, top($('#recent-list'))],
+    library: [$('.library-card'), top($('#sug-title'))],
+    lists: [top($('#fav-list')), top($('#playlist-list'))],
+    style: [$('.theme-panel')],
+  };
+  Object.entries(groups).forEach(([tab, els]) => els.forEach(el => { if (el) el.dataset.tab = tab; }));
+  const tabs = [['home', '🏠', 'Home'], ['library', '🎵', 'Library'], ['lists', '♥', 'Playlists'], ['style', '✿', 'Style']];
+  const nav = document.createElement('nav'); nav.id = 'tabbar'; nav.className = 'hidden'; nav.setAttribute('aria-label', 'Sections');
+  tabs.forEach(([id, icon, label]) => {
+    const b = document.createElement('button'); b.dataset.go = id; b.innerHTML = '<span class="ti"></span><span class="tl"></span>';
+    b.children[0].textContent = icon; b.children[1].textContent = label; b.onclick = () => setTab(id); nav.append(b);
+  });
+  const mp = document.createElement('div'); mp.id = 'mini-player'; mp.className = 'hidden';
+  mp.innerHTML = '<div class="art"></div><div class="mp-info"><b></b><span class="dim small"></span></div><button class="mp-play" aria-label="Play or pause"></button><button class="mp-next" aria-label="Next track">⏭</button><div class="mp-prog"><i></i></div>';
+  document.body.append(mp, nav);
+  let tab = 'home', lastArt = '';
+  function setTab(id) {
+    if (!groups[id]) id = 'home';
+    tab = id; home.dataset.tab = id;
+    Object.entries(groups).forEach(([name, els]) => els.forEach(el => { if (el) el.classList.toggle('tab-off', name !== id); }));
+    nav.querySelectorAll('button').forEach(b => b.toggleAttribute('aria-current', b.dataset.go === id));
+    try { localStorage.setItem('syncpair-tab', id); } catch {}
+    window.scrollTo({ top: 0 });
+  }
+  mp.querySelector('.mp-info').onclick = mp.querySelector('.art').onclick = () => setTab('home');
+  mp.querySelector('.mp-play').onclick = () => togglePlay();
+  mp.querySelector('.mp-next').onclick = () => skip(1);
+  // A link player (YouTube/Spotify...) must be visible to play reliably: jump back to Home when one loads.
+  const wrap = $('#embed-wrap');
+  if (wrap) new MutationObserver(() => { if (!wrap.classList.contains('hidden') && tab !== 'home') setTab('home'); }).observe(wrap, { attributes: true, attributeFilter: ['class'] });
+  setInterval(() => {
+    const onHome = !home.classList.contains('hidden');
+    nav.classList.toggle('hidden', !onHome);
+    const t = player.track, showMini = onHome && !!t && tab !== 'home';
+    mp.classList.toggle('hidden', !showMini);
+    if (!showMini) return;
+    const art = artStyle(t); if (art !== lastArt) { lastArt = art; mp.querySelector('.art').style.cssText = art; }
+    mp.querySelector('b').textContent = t.title; mp.querySelector('.mp-info span').textContent = t.artist || '';
+    mp.querySelector('.mp-play').textContent = player.playing ? '⏸' : '▶';
+    const d = player.duration(); mp.querySelector('.mp-prog i').style.width = (d > 0 ? Math.min(100, player.pos() / d * 100) : 0) + '%';
+  }, 500);
+  let saved = 'home'; try { saved = localStorage.getItem('syncpair-tab') || 'home'; } catch {}
+  setTab(saved);
+})();
+
+
+// ---- Fine-tune: personal look (font, corners, text size, alignment, background, density, motion), saved per device ----
+(function initFineTune() {
+  const panel = $('.theme-panel'); if (!panel) return;
+  const DEFAULTS = { align: 'center', font: 'rounded', radius: 22, scale: 100, bg: 'dots', density: 'cozy', motion: 'on' };
+  let look = { ...DEFAULTS };
+  try { look = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('syncpair-look') || '{}') }; } catch {}
+  const root = document.documentElement;
+  function apply() {
+    root.dataset.align = look.align; root.dataset.font = look.font; root.dataset.bg = look.bg;
+    root.dataset.density = look.density; root.dataset.motion = look.motion;
+    root.style.setProperty('--radius', look.radius + 'px'); root.style.setProperty('--scale', String(look.scale / 100));
+    try { localStorage.setItem('syncpair-look', JSON.stringify(look)); } catch {}
+  }
+  const select = (key, label, options) => ({ key, label, options });
+  const controls = [
+    select('align', 'Alignment', [['center', 'Centered'], ['left', 'Left']]),
+    select('font', 'Font', [['rounded', 'Soft rounded'], ['classic', 'Clean modern'], ['serif', 'Elegant serif'], ['mono', 'Typewriter']]),
+    select('bg', 'Background', [['dots', 'Dotted'], ['glow', 'Glow'], ['plain', 'Plain']]),
+    select('density', 'Spacing', [['cozy', 'Cozy'], ['compact', 'Compact']]),
+    select('motion', 'Animations', [['on', 'On'], ['off', 'Off']]),
+  ];
+  const box = document.createElement('details'); box.innerHTML = '<summary>Fine-tune the look</summary><div class="finetune"></div>';
+  const body = box.querySelector('.finetune');
+  const selects = {};
+  controls.forEach(c => {
+    const l = document.createElement('label'), s = document.createElement('select'); l.append(c.label + ' ');
+    c.options.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; s.append(o); });
+    s.onchange = () => { look[c.key] = s.value; apply(); }; selects[c.key] = s; l.append(s); body.append(l);
+  });
+  const sliders = {};
+  [['radius', 'Corner roundness', 6, 36], ['scale', 'Text & size', 90, 120]].forEach(([key, label, min, max]) => {
+    const l = document.createElement('label'), r = document.createElement('input'); l.append(label + ' ');
+    Object.assign(r, { type: 'range', min, max, step: 1 }); r.oninput = () => { look[key] = Number(r.value); apply(); }; sliders[key] = r; l.append(r); body.append(l);
+  });
+  const reset = document.createElement('button'); reset.className = 'mini'; reset.textContent = 'Reset look';
+  reset.onclick = () => { look = { ...DEFAULTS }; sync(); apply(); }; body.append(reset);
+  function sync() { Object.entries(selects).forEach(([k, s]) => { s.value = look[k]; }); Object.entries(sliders).forEach(([k, r]) => { r.value = look[k]; }); }
+  const roomLabel = panel.querySelector('label[for="room-name"]');
+  panel.insertBefore(box, roomLabel || null);
+  sync(); apply();
+  // Show the room name as a title on the home screen.
+  const header = $('#screen-home > header'), room = $('#room-name');
+  if (header && room) {
+    const title = document.createElement('p'); title.id = 'room-title'; header.after(title);
+    const paint = () => { title.textContent = room.value.trim(); }; room.addEventListener('input', paint); paint();
+  }
 })();

@@ -52,6 +52,21 @@ SyncPair does not bypass DRM, extract audio from other apps, or provide music li
 - **Invite to listen:** 📨 on a library song starts a synced session and the partner sees "invited you to listen to …".
 - **Favorites together** and **shared playlists** are stored per couple on the server (`data.json`, `pairs`) and update live for both phones.
 
+## Personalizing
+
+Style tab: theme presets and custom colors, plus *Fine-tune the look* (alignment, font, corner roundness, text size, background, spacing, animations) and a room name shown as the home title. Everything is centered by default; choose *Left* alignment to switch back. All choices are saved per device.
+
+## Navigation
+
+The home screen has a bottom tab bar (Home · Library · Playlists · Style) and a mini-player that keeps the current song controllable from any tab. Link players (YouTube / Spotify / SoundCloud) must stay visible to play, so loading one jumps back to Home. The last tab is remembered per device.
+
+## Reliability notes
+
+- `data.json` is written atomically (temp file + rename) with a rolling `data.json.bak`. If the main file is ever unreadable the server restores from the backup and sets the bad file aside as `data.json.corrupt-<timestamp>` instead of starting empty. Pending writes are flushed on `SIGTERM`, which Render sends on every deploy.
+- During a session only the session leader auto-advances at the end of a song and sends a 5-second `sync` heartbeat; the follower steps in only if nothing arrives. This keeps shuffle from desynchronizing the two phones.
+- Playlists can be renamed, reordered, shuffled and can mix uploaded songs with YouTube / Spotify / SoundCloud / direct-audio links. Deleting a song removes it from favorites, playlists and history.
+- `npm test` starts the server on a temporary data directory and runs an end-to-end smoke test with two simulated phones.
+
 ## Server setup
 
 Requirements: Node.js 18+.
@@ -114,7 +129,7 @@ Granting notification access is sensitive. Android shows a system settings scree
 This is an implementation scaffold and functional MVP, not a store-ready release. Before production, complete:
 
 - User authentication with passwordless email / passkeys, token rotation, logout, and account recovery.
-- Library and audio files are scoped to a pair (uploader + partner); `/music/*` requires the account token. Still to do: upload quotas per pair and delete/rename endpoints.
+- Library and audio files are scoped to a pair (uploader + partner); `/music/*` requires the account token. Each pair has a 250 MB quota, and songs can be renamed (either partner) or deleted (uploader only) via `PATCH`/`DELETE /api/library/:id`.
 - Database-backed users/tracks/sessions, durable session recovery, upload quotas, file validation, rate limits, malware scanning, backups, and abuse reporting.
 - Audio fingerprinting and an explicit same-track confirmation workflow before attempting to synchronize independent external players.
 - Android active-session selection (rather than first active session), external metadata/state observation, and per-player capability tests.

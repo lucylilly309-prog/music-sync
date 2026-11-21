@@ -14,15 +14,46 @@ const MUSIC_DIR = path.join(DATA_DIR, 'music');
 const DATA_FILE = path.join(DATA_DIR, 'data.json');
 fs.mkdirSync(MUSIC_DIR, { recursive: true });
 
+// ---- Persistence: atomic, debounced writes with a rolling backup ----
+// A crash in the middle of a plain writeFileSync could leave a truncated data.json, and the old loader then
+// silently started from an empty database (every account gone). Now: write to a temp file, keep the previous
+// good copy as data.json.bak, rename into place, and never discard an unreadable file without setting it aside.
+const BAK_FILE = DATA_FILE + '.bak';
+let saveTimer = null;
 function loadData() {
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-  catch { return { users: [], tracks: [] }; }
+  for (const file of [DATA_FILE, BAK_FILE]) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (file === BAK_FILE) console.warn('data.json was unreadable: restored from data.json.bak');
+      return data;
+    } catch (err) {
+      console.error(`Could not read ${path.basename(file)}: ${err.message}`);
+      try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch {}
+    }
+  }
+  return { users: [], tracks: [] };
 }
+function writeDataNow() {
+  clearTimeout(saveTimer); saveTimer = null;
+  const safeUsers = [...users.values()].map(({ online, _pairFails, token, ...u }) => u);
+  const tmp = DATA_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ users: safeUsers, tracks: [...tracks.values()], pairs: Object.fromEntries(pairs) }, null, 2));
+    if (fs.existsSync(DATA_FILE)) fs.copyFileSync(DATA_FILE, BAK_FILE);
+    fs.renameSync(tmp, DATA_FILE);
+  } catch (err) { console.error('Could not save data:', err.message); }
+}
+// Coalesce bursts of changes (a playlist edit, a favorite toggle...) into one write.
+function saveData() { if (!saveTimer) saveTimer = setTimeout(writeDataNow, 250); }
+
 const persisted = loadData();
 const tokenHash = token => crypto.createHash('sha256').update(String(token)).digest('hex');
 // Store only token hashes on disk; migrate legacy plaintext tokens transparently.
 const users = new Map((persisted.users || []).map(u => { const migrated = { ...u, tokenHash: u.tokenHash || (u.token ? tokenHash(u.token) : null), online: false }; delete migrated.token; return [u.id, migrated]; }));
-function userForToken(token) { const hash = tokenHash(token || ''); return [...users.values()].find(u => u.tokenHash && crypto.timingSafeEqual(Buffer.from(u.tokenHash), Buffer.from(hash))); }
+// Hash -> user id index, so authenticating a request is O(1) instead of scanning every account.
+const tokenIndex = new Map([...users.values()].filter(u => u.tokenHash).map(u => [u.tokenHash, u.id]));
+function userForToken(token) { if (!token) return undefined; const id = tokenIndex.get(tokenHash(token)); return id ? users.get(id) : undefined; }
 const tracks = new Map((persisted.tracks || []).map(t => [t.id, t]));
 const pairs = new Map(Object.entries(persisted.pairs || {})); // shared favorites + playlists per couple
 // Persist the token-hash migration immediately, so legacy plaintext credentials are not left on disk.
@@ -36,12 +67,13 @@ saveData();
 }
 const states = new Map();
 const sessions = new Map();
-function saveData() {
-  const safeUsers = [...users.values()].map(({ online, _pairFails, token, ...u }) => u);
-  fs.writeFileSync(DATA_FILE, JSON.stringify({ users: safeUsers, tracks: [...tracks.values()], pairs: Object.fromEntries(pairs) }, null, 2));
-}
 const app = express();
 app.set('trust proxy', 1); // Render sits behind a proxy
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN'); // embed.html is framed by our own page only
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 
 // Bearer-token auth for library endpoints (same token the socket uses).
@@ -62,7 +94,7 @@ function rateLimit(max, windowMs) {
   };
 }
 app.get('/health', (_req, res) => res.json({ ok: true, time: Date.now() }));
-app.get('/api/library', requireAuth, (req, res) => res.json([...tracks.values()].filter(t => canSee(req.user.id, t)).map(pubTrack)));
+app.get('/api/library', requireAuth, (req, res) => res.json([...tracks.values()].filter(t => canSee(req.user.id, t)).map(t => pubTrack(t, req.user.id))));
 app.post('/api/library', rateLimit(12, 60 * 60 * 1000), requireAuth, express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
   if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: 'Choose a non-empty audio file.' });
   if (req.body.length > 50 * 1024 * 1024) return res.status(413).json({ error: 'Audio files must be 50 MB or smaller.' });
@@ -76,7 +108,7 @@ app.post('/api/library', rateLimit(12, 60 * 60 * 1000), requireAuth, express.raw
   const hash = crypto.createHash('sha256').update(req.body).digest('hex');
   // Only dedupe against this pair's own library, never against another pair's files.
   const dup = [...tracks.values()].find(t => t.hash === hash && canSee(req.user.id, t));
-  if (dup) return res.status(200).json(pubTrack(dup)); // same audio already in the library
+  if (dup) return res.status(200).json(pubTrack(dup, req.user.id)); // same audio already in the library
   const id = crypto.randomUUID();
   const fileName = id + ext;
   fs.writeFileSync(path.join(MUSIC_DIR, fileName), req.body, { flag: 'wx' });
@@ -94,7 +126,36 @@ app.post('/api/library', rateLimit(12, 60 * 60 * 1000), requireAuth, express.raw
   };
   tracks.set(id, track);
   saveData();
-  res.status(201).json(pubTrack(track));
+  notifyPartner(req.user.id, 'library:changed'); // partner's library list updates without a reload
+  res.status(201).json(pubTrack(track, req.user.id));
+});
+// Rename / re-tag a song. Either partner may edit the metadata of a shared-library song.
+app.patch('/api/library/:id', requireAuth, (req, res) => {
+  const t = visibleTrack(req.user.id, req.params.id);
+  if (!t) return res.status(404).json({ error: 'Song not found.' });
+  const title = String(req.body?.title ?? t.title).trim().slice(0, 100);
+  const artist = String(req.body?.artist ?? t.artist).trim().slice(0, 100) || 'Unknown artist';
+  if (!title) return res.status(400).json({ error: 'A song needs a title.' });
+  t.title = title; t.artist = artist;
+  // Favorites, playlists and history keep a copy of the title; keep those copies in step.
+  const sync = i => { if (i.trackId === t.id) { i.title = title; i.artist = artist; } };
+  pairs.forEach(d => { (d.favorites || []).forEach(sync); (d.playlists || []).forEach(pl => (pl.items || []).forEach(sync)); });
+  users.forEach(u => (u.recent || []).forEach(sync));
+  saveData(); notifyLibrary(req.user.id); pushSharedFor(req.user.id);
+  res.json(pubTrack(t, req.user.id));
+});
+// Delete a song (uploader only): removes the file and every favorite / playlist / history entry pointing at it.
+app.delete('/api/library/:id', requireAuth, (req, res) => {
+  const t = visibleTrack(req.user.id, req.params.id);
+  if (!t) return res.status(404).json({ error: 'Song not found.' });
+  if (t.uploadedBy !== req.user.id) return res.status(403).json({ error: 'Only the person who uploaded this song can delete it.' });
+  tracks.delete(t.id);
+  try { fs.unlinkSync(path.join(MUSIC_DIR, path.basename(t.url))); } catch {}
+  const keep = i => i.trackId !== t.id;
+  pairs.forEach(d => { d.favorites = (d.favorites || []).filter(keep); (d.playlists || []).forEach(pl => { pl.items = (pl.items || []).filter(keep); }); });
+  users.forEach(u => { if (u.recent) u.recent = u.recent.filter(keep); });
+  saveData(); notifyLibrary(req.user.id); pushSharedFor(req.user.id);
+  res.json({ ok: true });
 });
 // Audio files require the account token (?t=… because <audio> cannot send headers) and are served only to
 // the uploader and their partner. Supports Range requests so seeking works.
@@ -121,7 +182,16 @@ const partnerOf = uid => { const u = users.get(uid); return u?.partnerId ? users
 // A library track belongs to the account that uploaded it and is shared with that account's partner only.
 const canSee = (uid, t) => !!t && !!t.uploadedBy && (t.uploadedBy === uid || partnerOf(uid)?.id === t.uploadedBy);
 const visibleTrack = (uid, id) => { const t = id ? tracks.get(String(id)) : null; return canSee(uid, t) ? t : null; };
-const pubTrack = t => { if (!t) return t; const { hash, uploadedBy, ...pub } = t; return pub; };
+const pubTrack = (t, uid) => { if (!t) return t; const { hash, uploadedBy, ...pub } = t; if (uid) pub.mine = uploadedBy === uid; return pub; };
+const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [] });
+const notifyPartner = (uid, event) => { const p = partnerOf(uid); if (p) io.to('user:' + p.id).emit(event); };
+const notifyLibrary = uid => { io.to('user:' + uid).emit('library:changed'); notifyPartner(uid, 'library:changed'); };
+// Push the couple's shared lists (and each person's history) after a change made outside a socket handler.
+function pushSharedFor(uid) {
+  const pr = pairOf(uid); if (!pr) return;
+  io.to('user:' + uid).to('user:' + pr.partner.id).emit('shared:update', sharedPayload(pr));
+  [users.get(uid), pr.partner].forEach(u => u && io.to('user:' + u.id).emit('recent:update', { recent: u.recent || [] }));
+}
 // ---- Shared links ----
 // YouTube, Spotify and SoundCloud play through each phone's own embedded player (synced, nothing downloaded);
 // direct audio URLs play natively; Apple Music, Deezer, Tidal... have no playback API, so they get a shared
@@ -192,7 +262,7 @@ app.post('/api/users', rateLimit(10, 60 * 60 * 1000), (req, res) => {
   const name = String(req.body?.name || 'Listener').trim().slice(0, 30) || 'Listener';
   const token = crypto.randomBytes(32).toString('hex');
   const user = { id: 'u_' + crypto.randomUUID(), name, tokenHash: tokenHash(token), code: rand(), partnerId: null, online: false };
-  users.set(user.id, user); saveData();
+  users.set(user.id, user); tokenIndex.set(user.tokenHash, user.id); saveData();
   res.status(201).json({ userId: user.id, token, code: user.code, name: user.name });
 });
 
@@ -234,7 +304,6 @@ io.on('connection', socket => {
     socket.emit('session:started', { session: sess });
     return sess;
   }
-  const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [] });
   const pushShared = pr => { saveData(); io.to('user:' + me.id).to('user:' + pr.partner.id).emit('shared:update', sharedPayload(pr)); };
   const NEED_PAIR = { ok: false, error: 'Pair with someone first.' };
 
@@ -306,6 +375,21 @@ io.on('connection', socket => {
     const pl = pr.data.playlists.find(x => x.id === p.id); if (!pl) return ack({ ok: false, error: 'Playlist not found.' });
     pl.items = pl.items.filter(x => x.key !== p.key); pushShared(pr); ack({ ok: true });
   });
+  limited('playlist:rename', 10, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const pl = pr.data.playlists.find(x => x.id === p.id); if (!pl) return ack({ ok: false, error: 'Playlist not found.' });
+    const name = String(p.name || '').trim().slice(0, 40); if (!name) return ack({ ok: false, error: 'Name your playlist.' });
+    pl.name = name; pushShared(pr); ack({ ok: true });
+  });
+  // Move one song up (direction -1) or down (+1) inside a playlist.
+  limited('playlist:move', 60, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const pl = pr.data.playlists.find(x => x.id === p.id); if (!pl) return ack({ ok: false, error: 'Playlist not found.' });
+    const from = pl.items.findIndex(x => x.key === p.key), to = from + (Number(p.direction) < 0 ? -1 : 1);
+    if (from < 0 || to < 0 || to >= pl.items.length) return ack({ ok: false, error: 'Cannot move it further.' });
+    [pl.items[from], pl.items[to]] = [pl.items[to], pl.items[from]];
+    pushShared(pr); ack({ ok: true });
+  });
   limited('playlist:delete', 10, 60_000, (p = {}, ack = () => {}) => {
     const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
     pr.data.playlists = pr.data.playlists.filter(x => x.id !== p.id); pushShared(pr); ack({ ok: true });
@@ -338,7 +422,7 @@ io.on('connection', socket => {
     ack({ ok: true, partner: publicUser(target) });
   });
 
-  limited('state:update', 20, 60_000, s => {
+  limited('state:update', 60, 60_000, s => {
     if (!s || typeof s !== 'object') return;
     const track = pubTrack(visibleTrack(me.id, s.trackId));
     const stamped = { trackId: (track || safeTrack(s.track))?.id || String(s.trackId || 'external'), track: track || safeTrack(s.track), source: s.source || 'syncpair', fingerprint: String(s.fingerprint || ''), positionMs: Math.max(0, Number(s.positionMs) || 0), isPlaying: !!s.isPlaying, userId: me.id, serverTime: Date.now() };
@@ -390,5 +474,19 @@ io.on('connection', socket => {
     const partner = partnerOf(me.id); if (partner) io.to('user:' + partner.id).emit('partner:presence', { online: anotherConnection });
   });
 });
+// Sessions live in memory; drop ones that nobody has been connected to for 15 minutes so they cannot pile up
+// (and so a stale session is not resumed days later).
+const sessionIdle = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, s] of sessions) {
+    if (users.get(s.a)?.online || users.get(s.b)?.online) { sessionIdle.delete(id); continue; }
+    const since = sessionIdle.get(id) || now; sessionIdle.set(id, since);
+    if (now - since > 15 * 60_000) { sessions.delete(id); sessionIdle.delete(id); }
+  }
+}, 60_000).unref();
+// Flush pending writes when the host stops the service (Render sends SIGTERM on every deploy).
+function shutdown() { writeDataNow(); process.exit(0); }
+process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => console.log(`SyncPair listening on http://localhost:${PORT}`));

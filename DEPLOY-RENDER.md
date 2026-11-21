@@ -11,3 +11,5 @@
 9. Enter that HTTPS URL in SyncPair on both phones.
 
 Do not use ephemeral storage for uploaded audio or user data. The server MVP still needs production hardening: authenticated library access, quotas, durable database, rate limits, and backups.
+
+The server keeps `data.json.bak` next to `data.json` on the disk and flushes pending writes when Render stops the service. Never commit `data.json`, `data.json.bak` or `music/`: they contain account token hashes and private audio.
