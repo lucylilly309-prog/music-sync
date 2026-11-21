@@ -1,5 +1,7 @@
 # SyncPair Universal — mobile-first music synchronization
 
+> **What is in this archive:** the Node.js + Socket.IO server and the mobile-first **web client** (`index.html`, `app.js`, `style.css`, `embed.html`). The Flutter app described under *Architecture* and *Mobile setup* (`mobile/`) is **not included** in this archive; those sections are kept as the design reference for it. Everything below marked "web" works today by opening the server URL on a phone.
+
 SyncPair Universal is a native Android/iOS app plus a small Node.js + Socket.IO coordination server. It does not require Spotify or another subscription integration. The reliable shared mode uses SyncPair's own player and a shared library. The Android build also contains an opt-in Android MediaSession adapter for compatible external players.
 
 ## Product contract: what is and is not universal
@@ -43,7 +45,7 @@ SyncPair does not bypass DRM, extract audio from other apps, or provide music li
 
 - **Flutter client:** one codebase for Android and iOS; `just_audio` handles the app-owned player and background playback notifications.
 - **Platform adapter:** Kotlin `MediaSessionManager` controls compatible Android media sessions after explicit notification access. iOS intentionally uses SyncPair's own player; there is no generic external-player control API.
-- **Synchronization server:** authenticates Socket.IO connections with per-account bearer tokens, pairs accounts, maintains session rooms, and relays timestamped commands. The session initiator is the sync clock leader and sends a three-second correction tick; the receiver estimates elapsed time from the server timestamp and seeks only when drift exceeds 250 ms. Audio is not relayed through Socket.IO.
+- **Synchronization server:** authenticates Socket.IO connections with per-account bearer tokens, pairs accounts, maintains session rooms, and relays timestamped commands. The session initiator is the sync clock leader and sends a 5-second `sync` heartbeat; the receiver estimates elapsed time from the server timestamp and corrects by seeking when drift exceeds 750 ms for uploaded audio or 2 s for embedded link players (at most once every 5 s). Audio is not relayed through Socket.IO.
 - **Audio distribution:** uploaded files live on the server's persistent volume. Each phone streams them and can download them into app storage for offline playback.
 
 ## Sharing features
@@ -60,12 +62,21 @@ Style tab: theme presets and custom colors, plus *Fine-tune the look* (alignment
 
 The home screen has a bottom tab bar (Home · Library · Playlists · Style) and a mini-player that keeps the current song controllable from any tab. Link players (YouTube / Spotify / SoundCloud) must stay visible to play, so loading one jumps back to Home. The last tab is remembered per device.
 
+## Install on your phone and lock-screen controls (web client)
+
+- **Add to Home Screen** (iOS Safari: Share → Add to Home Screen; Android Chrome: menu → Install app). The server publishes a web manifest and icons, so SyncPair opens full-screen like an app.
+- Playback uses the browser **Media Session API**: song title, artist and play / pause / previous / next / seek controls appear on the lock screen, Bluetooth headphones and car displays. These controls go through the same code as the on-screen buttons, so they stay synchronized with your partner.
+- Messages (errors, "could not send", etc.) appear as small toasts instead of blocking dialogs, so they never interrupt playback.
+- If the server forgets your account (for example its data disk was reset), the app now says so and returns to account creation instead of sitting silently on the pairing screen.
+- A note you are typing on your partner's profile is no longer wiped when their playback status updates.
+
 ## Reliability notes
 
 - `data.json` is written atomically (temp file + rename) with a rolling `data.json.bak`. If the main file is ever unreadable the server restores from the backup and sets the bad file aside as `data.json.corrupt-<timestamp>` instead of starting empty. Pending writes are flushed on `SIGTERM`, which Render sends on every deploy.
 - During a session only the session leader auto-advances at the end of a song and sends a 5-second `sync` heartbeat; the follower steps in only if nothing arrives. This keeps shuffle from desynchronizing the two phones.
 - Playlists can be renamed, reordered, shuffled and can mix uploaded songs with YouTube / Spotify / SoundCloud / direct-audio links. Deleting a song removes it from favorites, playlists and history.
-- `npm test` starts the server on a temporary data directory and runs an end-to-end smoke test with two simulated phones.
+- `npm test` runs two suites: `test/smoke.js` starts the server on a temporary data directory and drives it with two simulated phones (pairing, library, playlists, sessions, restart + corrupted-file recovery, static files, JSON errors); `test/client.js` loads the web client in jsdom and checks the note-draft, stale-account and toast behaviour.
+- Rate-limiter state is pruned periodically, and body-parser errors (oversized or malformed requests) are returned as JSON.
 
 ## Server setup
 

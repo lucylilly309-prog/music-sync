@@ -86,6 +86,8 @@ function requireAuth(req, res, next) {
 // Tiny in-memory rate limiter: `max` hits per `windowMs` per key.
 function rateLimit(max, windowMs) {
   const hits = new Map();
+  // Drop keys whose hits have all expired; otherwise every client IP ever seen stays in memory.
+  setInterval(() => { const now = Date.now(); for (const [k, arr] of hits) if (!arr.some(t => now - t < windowMs)) hits.delete(k); }, Math.max(windowMs, 60_000)).unref();
   return (req, res, next) => {
     const key = req.ip, now = Date.now();
     const arr = (hits.get(key) || []).filter(t => now - t < windowMs);
@@ -170,10 +172,15 @@ app.get('/music/:file', (req, res) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.sendFile(path.join(MUSIC_DIR, file), err => { if (err && !res.headersSent) res.status(404).json({ error: 'Not found.' }); });
 });
-app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'index.html')));
-app.get('/app.js', (_req, res) => res.sendFile(path.join(ROOT, 'app.js')));
-app.get('/embed.html', (_req, res) => res.sendFile(path.join(ROOT, 'embed.html')));
-app.get('/style.css', (_req, res) => res.sendFile(path.join(ROOT, 'style.css')));
+// Only these files are public; everything else (data.json, music/, source) is never served statically.
+const STATIC_FILES = {
+  '/': ['index.html'], '/app.js': ['app.js'], '/embed.html': ['embed.html'], '/style.css': ['style.css'],
+  '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json'],
+  '/icon-192.png': ['icon-192.png'], '/icon-512.png': ['icon-512.png'], '/apple-touch-icon.png': ['apple-touch-icon.png'],
+};
+for (const [route, [file, type]] of Object.entries(STATIC_FILES)) {
+  app.get(route, (_req, res) => { if (type) res.type(type); res.sendFile(path.join(ROOT, file)); });
+}
 const server = http.createServer(app);
 const io = new Server(server);
 const rand = (n = 6) => crypto.randomBytes(Math.ceil(n / 2)).toString('hex').slice(0, n).toUpperCase();
@@ -264,6 +271,15 @@ app.post('/api/users', rateLimit(10, 60 * 60 * 1000), (req, res) => {
   const user = { id: 'u_' + crypto.randomUUID(), name, tokenHash: tokenHash(token), code: rand(), partnerId: null, online: false };
   users.set(user.id, user); tokenIndex.set(user.tokenHash, user.id); saveData();
   res.status(201).json({ userId: user.id, token, code: user.code, name: user.name });
+});
+
+// Body-parser and other errors used to come back as an HTML stack page; the client expects JSON.
+app.use((err, _req, res, next) => {
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) console.error(err);
+  const message = err.type === 'entity.too.large' ? 'That upload is too large.' : status < 500 ? 'Invalid request.' : 'Something went wrong on the server.';
+  res.status(status).json({ error: message });
 });
 
 io.use((socket, next) => {

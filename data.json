@@ -18,7 +18,7 @@
           "artist": "Unknown artist",
           "link": "",
           "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
-          "playedAt": 1795197696500
+          "playedAt": 1795288575797
         },
         {
           "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
@@ -53,7 +53,7 @@
           "artist": "Unknown artist",
           "link": "",
           "addedBy": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113",
-          "playedAt": 1795197696593
+          "playedAt": 1795288580249
         },
         {
           "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
@@ -111,6 +111,15 @@
           "name": "love",
           "items": [],
           "createdBy": "u_0c2ff6e5-fa43-42ed-8a23-7403dff18113"
+        }
+      ],
+      "notes": [
+        {
+          "id": "2de4bf20-fc92-455c-933c-b307c5920fd9",
+          "fromId": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+          "fromName": "nourhene",
+          "text": "it's working",
+          "createdAt": 1795288664994
         }
       ]
     }

@@ -1,5 +1,11 @@
 /* SyncPair client: real HTMLAudioElement playback + server-timestamped sync. */
 const $ = selector => document.querySelector(selector);
+const ICONS = {
+  play: 'M8 5v14l11-7z', pause: 'M6 5h4v14H6zm8 0h4v14h-4z', prev: 'M6 6h2v12H6zm3.5 6L18 18V6z', next: 'M16 6h2v12h-2zM6 18l8.5-6L6 6z',
+  home: 'M12 3 3 11h2v9h5v-6h4v6h5v-9h2z', music: 'M12 3v10.55A4 4 0 1 0 14 17V7h4V3z', heart: 'M12 21s-8-4.9-9.6-9.7C1 7.700 3.400 4.500 6.600 4.500c2 0 3.700 1.100 5.400 3.100 1.700-2 3.400-3.100 5.400-3.100 3.200 0 5.600 3.200 4.200 6.800C20 16.100 12 21 12 21z',
+  spark: 'M12 2l2.4 6.6L21 11l-6.600 2.400L12 20l-2.400-6.600L3 11l6.600-2.400z'
+};
+const icon = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
 const audio = $('#audio-player');
 const me = { id: null, name: '', token: null, code: null };
 let socket = null, partner = null, partnerState = null, partnerOnline = false;
@@ -10,6 +16,15 @@ let lastCorrection = 0, wantPlaying = false, lastPlayCmd = 0, playRetries = 0;
 let recent = [], lastRecent = { id: null, at: 0 };
 let shared = { favorites: [], playlists: [], notes: [] }, queue = null, pendingItem = null, suggestion = null;
 let shuffleOn = false, repeatMode = 'off', sleepDeadline = 0, sleepAtTrackEnd = false, sleepInterval = null;
+let noteDraft = ''; // text typed in the note box; survives re-renders of the partner card
+
+// Non-blocking message (replaces notify(), which freezes the page and the audio UI on phones).
+let toastTimer = null;
+function notify(message) {
+  const box = $('#toast'); if (!box) return;
+  box.textContent = String(message || ''); box.classList.remove('hidden');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => box.classList.add('hidden'), 4500);
+}
 
 // ---- Link tracks: embedded players (YouTube/Spotify/SoundCloud) and a shared clock for apps without an API ----
 const EMBED_PROVIDERS = ['youtube', 'spotify', 'soundcloud'];
@@ -35,7 +50,10 @@ window.addEventListener('message', e => {
     // Ignore spurious "ended" (seek past the end, a player reload): only skip when the song really reached its end.
     const d = player.duration();
     wantPlaying = false;
-    if (!isApplyingRemote && d > 0 && player.pos() >= d - 3000) { safeLog('⏭ track ended, playing next'); autoAdvance(); }
+    if (!isApplyingRemote && d > 0 && player.pos() >= d - 3000) {
+      if (sleepAtTrackEnd) { window.stopForSleep?.(); return; }
+      safeLog('⏭ track ended, playing next'); autoAdvance();
+    }
     else safeLog('ignored a false “ended” from the player');
   }
   else if (m.t === 'error') { $('#player-status').textContent = m.msg; $('#session-status').textContent = m.msg; }
@@ -196,11 +214,16 @@ function connectMine(token) {
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
   socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); });
   socket.on('track:suggest', s => { suggestion = s; renderSuggestBanner(); });
-  socket.on('connect_error', err => { $('#upload-status').textContent = err.message; });
+  socket.on('connect_error', err => {
+    // The server no longer knows this token (data reset, or a different server). Retrying can never work, so
+    // return to sign-up instead of leaving the person on a pair screen that silently does nothing.
+    if (/^Authentication failed/i.test(err.message || '')) { resetAccount('Your saved account was not found on this server (it may have been reset). Create a new account to continue.'); return; }
+    $('#upload-status').textContent = err.message;
+  });
   socket.on('clock:sync', ({ serverTime }) => { serverOffset = serverTime - Date.now(); });
   socket.on('partner:info', p => { partner = p; partnerOnline = !!p.online; renderHome(); refreshShared(); });
   socket.on('partner:presence', ({ online }) => { partnerOnline = !!online; renderPresence(); renderPartnerCard(); });
-  socket.on('partner:state', st => { partnerState = st; renderPartnerCard(); });
+  socket.on('partner:state', st => { partnerState = st; renderPartnerNow(); });
   socket.on('session:invite', ({ session: incoming, from, item }) => { pendingInvite = incoming; pendingItem = item || null; refreshLibrary().catch(() => {}); renderInviteBanner(from); });
   socket.on('session:started', ({ session: started }) => { session = started; pendingInvite = null; pendingItem = null; enterSession(); });
   socket.on('session:resume', ({ session: resumed }) => { session = resumed; enterSession(); });
@@ -213,6 +236,15 @@ function connectMine(token) {
   socket.on('react', r => { floatEmoji(r.emoji); safeLog(`${r.from} reacted ${r.emoji} at ${fmt(r.positionMs)}`); });
   socket.on('chat', m => safeLog(m.text, `${m.from}: `));
 }
+function resetAccount(message) {
+  try { localStorage.removeItem('syncpair-account'); } catch {}
+  socket?.close(); socket = null;
+  Object.assign(me, { id: null, name: '', token: null, code: null });
+  partner = null; partnerState = null; partnerOnline = false; session = null; pendingInvite = null; library = []; noteDraft = '';
+  $('#create-box').classList.remove('hidden'); $('#pair-box').classList.add('hidden');
+  const status = $('#pair-status'); status.textContent = message || ''; status.classList.toggle('hidden', !message);
+  show('#screen-pair');
+}
 function renderPresence() {
   const dot = $('#presence'); if (dot) dot.className = 'dot' + (partnerOnline ? ' on' : '');
 }
@@ -222,7 +254,13 @@ function renderHome() {
   show('#screen-home');
 }
 function renderPartnerCard() {
-  const card = $('#partner-card'); card.replaceChildren();
+  const card = $('#partner-card');
+  // This card is rebuilt on every presence/shared update. Keep what the person is typing (and the caret).
+  const oldInput = card.querySelector('.profile-note-composer textarea');
+  const hadFocus = !!oldInput && document.activeElement === oldInput;
+  const caret = oldInput ? [oldInput.selectionStart, oldInput.selectionEnd] : null;
+  if (oldInput) noteDraft = oldInput.value;
+  card.replaceChildren();
   if (!partner) {
     const p = document.createElement('p'); p.className = 'dim';
     p.textContent = 'Pair with your partner using their code to start leaving little notes.';
@@ -240,18 +278,8 @@ function renderPartnerCard() {
   details.append(eyebrow, heading, status); top.append(avatar, details);
   card.append(top);
 
-  if (partnerState?.track) {
-    const now = document.createElement('div'); now.className = 'profile-now-playing';
-    const kicker = document.createElement('span'); kicker.className = 'profile-eyebrow'; kicker.textContent = 'IN THEIR HEADPHONES';
-    const row = document.createElement('div'); row.className = 'row partner-track';
-    const art = document.createElement('div'); art.className = 'art'; art.style.cssText = artStyle(partnerState.track);
-    const info = document.createElement('div'); info.className = 'profile-track-info';
-    const title = document.createElement('b'); title.textContent = partnerState.track.title;
-    const artist = document.createElement('p'); artist.className = 'dim small'; artist.textContent = partnerState.track.artist;
-    const playing = document.createElement('p'); playing.className = 'small ' + (partnerState.isPlaying ? 'live' : 'dim');
-    playing.textContent = partnerState.isPlaying ? '♫ Listening now' : 'Ⅱ Taking a pause';
-    info.append(title, artist, playing); row.append(art, info); now.append(kicker, row); card.append(now);
-  }
+  const nowSlot = document.createElement('div'); nowSlot.className = 'profile-now-slot'; card.append(nowSlot);
+  renderPartnerNow();
 
   const wall = document.createElement('section'); wall.className = 'profile-note-wall';
   const wallHead = document.createElement('div'); wallHead.className = 'profile-wall-heading';
@@ -265,7 +293,8 @@ function renderPartnerCard() {
 
   const composer = document.createElement('div'); composer.className = 'profile-note-composer';
   const input = document.createElement('textarea');
-  input.maxLength = 280; input.rows = 2;
+  input.maxLength = 280; input.rows = 2; input.value = noteDraft;
+  input.addEventListener('input', () => { noteDraft = input.value; });
   input.placeholder = 'A tiny reminder, an inside joke, or just “thinking of you”…';
   input.setAttribute('aria-label', 'Write a note for your partner');
   const composeFoot = document.createElement('div'); composeFoot.className = 'profile-note-compose-foot';
@@ -277,8 +306,8 @@ function renderPartnerCard() {
     send.disabled = true;
     socket.emit('note:add', { text }, result => {
       send.disabled = false;
-      if (!result?.ok) { alert(result?.error || 'Could not leave your note.'); return; }
-      input.value = '';
+      if (!result?.ok) { notify(result?.error || 'Could not leave your note.'); return; }
+      input.value = ''; noteDraft = '';
       input.placeholder = 'Your note is on their profile ♡';
     });
   };
@@ -303,7 +332,7 @@ function renderPartnerCard() {
         const remove = document.createElement('button'); remove.className = 'note-delete'; remove.textContent = '×';
         remove.title = 'Remove your note'; remove.setAttribute('aria-label', 'Remove your note');
         remove.onclick = () => socket.emit('note:delete', { id: note.id }, result => {
-          if (!result?.ok) alert(result?.error || 'Could not remove note.');
+          if (!result?.ok) notify(result?.error || 'Could not remove note.');
         });
         item.append(remove);
       }
@@ -316,6 +345,24 @@ function renderPartnerCard() {
     const button = document.createElement('button'); button.className = 'primary profile-listen-btn';
     button.textContent = '♡ Listen together'; button.onclick = startSession; card.append(button);
   }
+  if (hadFocus) { input.focus(); try { input.setSelectionRange(caret[0], caret[1]); } catch {} }
+}
+// The partner's "in their headphones" block is refreshed in place (it changes every few seconds), so typing a
+// note is never interrupted by the partner's playback updates.
+function renderPartnerNow() {
+  const slot = $('#partner-card .profile-now-slot'); if (!slot) return;
+  slot.replaceChildren();
+  if (!partnerState?.track) return;
+  const now = document.createElement('div'); now.className = 'profile-now-playing';
+  const kicker = document.createElement('span'); kicker.className = 'profile-eyebrow'; kicker.textContent = 'IN THEIR HEADPHONES';
+  const row = document.createElement('div'); row.className = 'row partner-track';
+  const art = document.createElement('div'); art.className = 'art'; art.style.cssText = artStyle(partnerState.track);
+  const info = document.createElement('div'); info.className = 'profile-track-info';
+  const title = document.createElement('b'); title.textContent = partnerState.track.title;
+  const artist = document.createElement('p'); artist.className = 'dim small'; artist.textContent = partnerState.track.artist;
+  const playing = document.createElement('p'); playing.className = 'small ' + (partnerState.isPlaying ? 'live' : 'dim');
+  playing.textContent = partnerState.isPlaying ? '♫ Listening now' : 'Ⅱ Taking a pause';
+  info.append(title, artist, playing); row.append(art, info); now.append(kicker, row); slot.append(now);
 }
 function renderInviteBanner(from) {
   const banner = $('#invite-banner'); banner.replaceChildren();
@@ -324,7 +371,7 @@ function renderInviteBanner(from) {
   const message = document.createElement('p'); const who = from?.name || partner?.name || 'Your partner';
   message.textContent = pendingItem ? `${who} invited you to listen to “${pendingItem.title}”.` : `${who} invited you to listen together.`;
   const join = document.createElement('button'); join.className = 'primary'; join.textContent = 'Join session';
-  join.onclick = () => socket.emit('session:join', { id: pendingInvite.id }, result => { if (!result?.ok) alert(result?.error || 'Could not join session.'); });
+  join.onclick = () => socket.emit('session:join', { id: pendingInvite.id }, result => { if (!result?.ok) notify(result?.error || 'Could not join session.'); });
   banner.append(message, join);
 }
 let lastRenderKey = '';
@@ -336,10 +383,34 @@ function renderPlayer(force = false) {
   lastRenderKey = key;
   $('#me-art').style.cssText = artStyle(track); $('#me-title').textContent = track.title; $('#me-artist').textContent = track.artist;
   $('#sess-title').textContent = track.title; $('#sess-artist').textContent = track.artist;
-  $('#me-play').textContent = player.playing ? '⏸' : '▶'; $('#s-play').textContent = player.playing ? '⏸' : '▶';
+  const pi = icon(player.playing ? 'pause' : 'play'); $('#me-play').innerHTML = pi; $('#s-play').innerHTML = pi;
+  $('#me-play').setAttribute('aria-label', player.playing ? 'Pause' : 'Play'); $('#s-play').setAttribute('aria-label', player.playing ? 'Pause' : 'Play');
+  $('#sess-art').style.cssText = artStyle(track);
   const duration = player.duration();
   $('#me-duration').textContent = fmt(duration); $('#sess-duration').textContent = fmt(duration);
+  updateMediaSession(track);
 }
+// Lets the lock screen, Bluetooth headphones and car displays show the song and control playback. Because these
+// go through the same togglePlay/skip/broadcast functions, they stay synchronized with the partner too.
+let mediaKey = '';
+function updateMediaSession(track) {
+  if (!('mediaSession' in navigator)) return;
+  const key = `${track.id}|${track.title}|${track.artist}`;
+  if (key !== mediaKey) {
+    mediaKey = key;
+    try { navigator.mediaSession.metadata = new MediaMetadata({ title: track.title || 'SyncPair', artist: track.artist || '', album: 'SyncPair' }); } catch {}
+  }
+  navigator.mediaSession.playbackState = player.playing ? 'playing' : 'paused';
+}
+(function initMediaSessionActions() {
+  if (!('mediaSession' in navigator)) return;
+  const set = (action, handler) => { try { navigator.mediaSession.setActionHandler(action, handler); } catch {} };
+  set('play', () => { if (!player.playing) togglePlay(); });
+  set('pause', () => { if (player.playing) togglePlay(); });
+  set('previoustrack', () => skip(-1));
+  set('nexttrack', () => skip(1));
+  set('seekto', d => { if (player.track && Number.isFinite(d?.seekTime)) { player.seek(d.seekTime * 1000); broadcast('seek'); } });
+})();
 function renderLibrary() {
   const list = $('#library-list'); list.replaceChildren();
   $('#track-count').textContent = `${library.length} ${library.length === 1 ? 'track' : 'tracks'}`;
@@ -351,6 +422,7 @@ function renderLibrary() {
   if (!visible.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = term ? 'No songs match your search.' : 'Your library is empty.'; list.append(p); return; }
   visible.forEach(track => {
     const row = document.createElement('div'); row.className = 'library-row';
+    const thumb = document.createElement('div'); thumb.className = 'art'; thumb.style.cssText = artStyle(track);
     const details = document.createElement('div'); details.className = 'track-info';
     const title = document.createElement('b'); title.textContent = track.title;
     const artist = document.createElement('p'); artist.className = 'dim small'; artist.textContent = `${track.artist} · ${fmt(track.durationMs || 0)}`;
@@ -366,7 +438,7 @@ function renderLibrary() {
       mini('✎', 'Edit title and artist', () => editTrack(track)),
       ...(track.mine ? [mini('🗑', 'Delete song', () => deleteTrack(track))] : []),
       play);
-    row.append(details, actions); list.append(row);
+    row.append(thumb, details, actions); list.append(row);
   });
 }
 async function refreshLibrary() {
@@ -506,7 +578,7 @@ async function applyControl(control) {
   } catch (error) { $('#session-status').textContent = error.message + ' Tap Play to enable audio.'; }
   finally { isApplyingRemote = false; }
 }
-function startSession() { socket.emit('session:start', {}, result => { if (!result?.ok) alert(result?.error || 'Could not start session.'); }); }
+function startSession() { socket.emit('session:start', {}, result => { if (!result?.ok) notify(result?.error || 'Could not start session.'); }); }
 function enterSession() {
   show('#screen-session');
   renderPlayer(true); safeLog('🎧 Listening session connected.');
@@ -550,12 +622,6 @@ setInterval(() => {
     const drift = expected - player.pos();
     if (Math.abs(drift) > (isLinkTrack(player.track) ? 2000 : 750) && Date.now() - lastCorrection > 5000) { lastCorrection = Date.now(); player.seek(expected); safeLog(`↻ corrected playback drift (${Math.round(drift)} ms)`); }
   }
-  if (partnerState?.track) {
-    const duration = partnerState.track.durationMs || 1;
-    let position = partnerState.positionMs || 0;
-    if (partnerState.isPlaying) position += Math.max(0, Date.now() + serverOffset - partnerState.serverTime);
-    // partner playback is displayed as text; the home card stays lightweight.
-  }
 }, 500);
 setInterval(() => { if (socket?.connected) { publishState(); socket.emit('clock:sync'); } }, 5000);
 
@@ -566,12 +632,12 @@ $('#btn-create').onclick = async () => {
     localStorage.setItem('syncpair-account', JSON.stringify(me));
     $('#my-code').textContent = me.code; $('#create-box').classList.add('hidden'); $('#pair-box').classList.remove('hidden');
     connectMine(me.token); await refreshLibrary();
-  } catch (error) { alert(error.message); }
+  } catch (error) { notify(error.message); }
 };
 $('#btn-join-code').onclick = () => {
-  if (!socket?.connected) return alert('Connecting to SyncPair. Please try again in a moment.');
+  if (!socket?.connected) return notify('Connecting to SyncPair. Please try again in a moment.');
   socket.emit('pair:accept', { code: $('#inp-code').value.trim().toUpperCase() }, result => {
-    if (!result?.ok) alert(result?.error || 'Pairing failed.'); else { partner = result.partner; partnerOnline = !!result.partner.online; renderHome(); }
+    if (!result?.ok) notify(result?.error || 'Pairing failed.'); else { partner = result.partner; partnerOnline = !!result.partner.online; renderHome(); }
   });
 };
 $('#audio-file').addEventListener('change', event => uploadFiles([...event.target.files]));
@@ -593,10 +659,10 @@ const keyOf = i => i.trackId || ('ext:' + ((i.title || '').trim() + '|' + (i.art
 const isFav = i => shared.favorites.some(f => f.key === keyOf(i));
 function mini(text, title, onclick) { const b = document.createElement('button'); b.className = 'mini'; b.textContent = text; b.title = title; b.setAttribute('aria-label', title); b.onclick = onclick; return b; }
 function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites || [], playlists: r.playlists || [], notes: r.notes || [] }; renderShared(); renderLibrary(); renderPartnerCard(); } }); }
-function toggleFav(item) { socket.emit('fav:toggle', { item }, r => { if (!r?.ok) alert(r?.error || 'Could not update favorites.'); }); }
+function toggleFav(item) { socket.emit('fav:toggle', { item }, r => { if (!r?.ok) notify(r?.error || 'Could not update favorites.'); }); }
 function inviteToListen(item) {
   socket.emit('track:invite', { item }, r => {
-    if (!r?.ok) return alert(r?.error || 'Could not send.');
+    if (!r?.ok) return notify(r?.error || 'Could not send.');
     const it = r.item || item;
     const t = it.trackId ? library.find(x => x.id === it.trackId) : (it.provider ? trackFromItem(it) : null);
     if (t) selectTrack(t, true); else $('#upload-status').textContent = `Sent to ${partner?.name || 'your partner'}.`;
@@ -637,9 +703,9 @@ function renderPlaylistPicker() {
 }
 function newPlaylist() {
   const name = (prompt('Playlist name') || '').trim(); if (!name) return;
-  if (!socket?.connected) { alert('Reconnecting… please try again.'); return; }
+  if (!socket?.connected) { notify('Reconnecting… please try again.'); return; }
   socket.emit('playlist:create', { name }, r => {
-    if (!r?.ok) { alert(r?.error || 'Could not create playlist.'); return; }
+    if (!r?.ok) { notify(r?.error || 'Could not create playlist.'); return; }
     refreshShared();
     if (playlistPendingItem) {
       socket.emit('playlist:add', { id: r.playlist.id, item: playlistPendingItem }, result => {
@@ -690,7 +756,7 @@ function listenTogether(item) {
   input.onchange = async () => {
     const f = input.files[0]; if (!f) return;
     try { $('#upload-status').textContent = `Uploading ${item.title}…`; const r = await uploadWithMeta(f, item); inviteToListen({ trackId: r.id }); }
-    catch (e) { alert(e.message); }
+    catch (e) { notify(e.message); }
   };
   input.click();
 }
@@ -700,6 +766,7 @@ function searchLinks(item) {
 }
 function itemRow(item, extra = []) {
   const row = document.createElement('div'); row.className = 'library-row';
+  const thumb = document.createElement('div'); thumb.className = 'art'; thumb.style.cssText = artStyle({ id: item.trackId || item.key || item.title });
   const info = document.createElement('div'); info.className = 'track-info';
   const t = document.createElement('b'); t.textContent = item.title;
   const a = document.createElement('p'); a.className = 'dim small'; a.textContent = item.artist || (item.trackId ? '' : 'Shared from another player');
@@ -711,7 +778,7 @@ function itemRow(item, extra = []) {
     if (item.link) { const l = document.createElement('a'); l.href = item.link; l.target = '_blank'; l.rel = 'noopener noreferrer'; l.textContent = '↗'; l.className = 'mini'; actions.append(l); }
   }
   actions.append(mini('📨', 'Invite partner', () => inviteToListen(item)), ...extra);
-  row.append(info, actions); return row;
+  row.append(thumb, info, actions); return row;
 }
 // Records a song in "Recently played" once per listen (not on every pause/resume).
 function markPlayed(track) {
@@ -746,7 +813,7 @@ function renderShared() {
     bar.append(
       mini('▶ Play', 'Play playlist', () => playItems(p.items)),
       mini('🔀', 'Shuffle play', () => playItems(p.items, { shuffle: true })),
-      mini('✎', 'Rename playlist', () => { const name = (prompt('Playlist name', p.name) || '').trim(); if (name && name !== p.name) socket.emit('playlist:rename', { id: p.id, name }, r => { if (!r?.ok) alert(r?.error || 'Could not rename.'); }); }),
+      mini('✎', 'Rename playlist', () => { const name = (prompt('Playlist name', p.name) || '').trim(); if (name && name !== p.name) socket.emit('playlist:rename', { id: p.id, name }, r => { if (!r?.ok) notify(r?.error || 'Could not rename.'); }); }),
       mini('🗑', 'Delete playlist', () => { if (confirm(`Delete “${p.name}”?`)) socket.emit('playlist:delete', { id: p.id }); }));
     d.append(bar);
     p.items.forEach((i, n) => d.append(itemRow(i, [
@@ -775,7 +842,7 @@ $('#playlist-picker').addEventListener('click', e => { if (e.target.id === 'play
 $('#playlist-picker-create').onclick = newPlaylist;
 $('#tap-play').onclick = () => { playRetries = 0; player.play(); $('#tap-play').classList.add('hidden'); };
 $('#btn-suggest').onclick = () => {
-  const title = $('#sug-title').value.trim(); if (!title) return alert('Enter the song title.');
+  const title = $('#sug-title').value.trim(); if (!title) return notify('Enter the song title.');
   inviteToListen({ title, artist: $('#sug-artist').value.trim(), link: $('#sug-link').value.trim() });
   ['#sug-title', '#sug-artist', '#sug-link'].forEach(s => { $(s).value = ''; });
 };
@@ -877,14 +944,15 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
     style: [$('.theme-panel')],
   };
   Object.entries(groups).forEach(([tab, els]) => els.forEach(el => { if (el) el.dataset.tab = tab; }));
-  const tabs = [['home', '🏠', 'Home'], ['library', '🎵', 'Library'], ['lists', '♥', 'Playlists'], ['style', '✿', 'Style']];
+  const tabs = [['home', 'home', 'Home'], ['library', 'music', 'Library'], ['lists', 'heart', 'Playlists'], ['style', 'spark', 'Style']];
   const nav = document.createElement('nav'); nav.id = 'tabbar'; nav.className = 'hidden'; nav.setAttribute('aria-label', 'Sections');
-  tabs.forEach(([id, icon, label]) => {
+  tabs.forEach(([id, iconName, label]) => {
     const b = document.createElement('button'); b.dataset.go = id; b.innerHTML = '<span class="ti"></span><span class="tl"></span>';
-    b.children[0].textContent = icon; b.children[1].textContent = label; b.onclick = () => setTab(id); nav.append(b);
+    b.children[0].innerHTML = icon(iconName); b.children[1].textContent = label; b.onclick = () => setTab(id); nav.append(b);
   });
   const mp = document.createElement('div'); mp.id = 'mini-player'; mp.className = 'hidden';
   mp.innerHTML = '<div class="art"></div><div class="mp-info"><b></b><span class="dim small"></span></div><button class="mp-play" aria-label="Play or pause"></button><button class="mp-next" aria-label="Next track">⏭</button><div class="mp-prog"><i></i></div>';
+  mp.querySelector('.mp-next').innerHTML = icon('next');
   document.body.append(mp, nav);
   let tab = 'home', lastArt = '';
   function setTab(id) {
@@ -909,7 +977,7 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
     if (!showMini) return;
     const art = artStyle(t); if (art !== lastArt) { lastArt = art; mp.querySelector('.art').style.cssText = art; }
     mp.querySelector('b').textContent = t.title; mp.querySelector('.mp-info span').textContent = t.artist || '';
-    mp.querySelector('.mp-play').textContent = player.playing ? '⏸' : '▶';
+    mp.querySelector('.mp-play').innerHTML = icon(player.playing ? 'pause' : 'play');
     const d = player.duration(); mp.querySelector('.mp-prog i').style.width = (d > 0 ? Math.min(100, player.pos() / d * 100) : 0) + '%';
   }, 500);
   let saved = 'home'; try { saved = localStorage.getItem('syncpair-tab') || 'home'; } catch {}
@@ -920,7 +988,7 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
 // ---- Fine-tune: personal look (font, corners, text size, alignment, background, density, motion), saved per device ----
 (function initFineTune() {
   const panel = $('.theme-panel'); if (!panel) return;
-  const DEFAULTS = { align: 'center', font: 'rounded', radius: 22, scale: 100, bg: 'dots', density: 'cozy', motion: 'on' };
+  const DEFAULTS = { align: 'left', font: 'rounded', radius: 22, scale: 100, bg: 'dots', density: 'cozy', motion: 'on' };
   let look = { ...DEFAULTS };
   try { look = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('syncpair-look') || '{}') }; } catch {}
   const root = document.documentElement;
@@ -932,7 +1000,7 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
   }
   const select = (key, label, options) => ({ key, label, options });
   const controls = [
-    select('align', 'Alignment', [['center', 'Centered'], ['left', 'Left']]),
+    select('align', 'Alignment', [['left', 'Left'], ['center', 'Centered']]),
     select('font', 'Font', [['rounded', 'Soft rounded'], ['classic', 'Clean modern'], ['serif', 'Elegant serif'], ['mono', 'Typewriter']]),
     select('bg', 'Background', [['dots', 'Dotted'], ['glow', 'Glow'], ['plain', 'Plain']]),
     select('density', 'Spacing', [['cozy', 'Cozy'], ['compact', 'Compact']]),
@@ -964,3 +1032,7 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
     const paint = () => { title.textContent = room.value.trim(); }; room.addEventListener('input', paint); paint();
   }
 })();
+
+// Static transport icons (prev/next/play) — replaces emoji glyphs with consistent SVGs.
+document.querySelectorAll('[data-icon]').forEach(b => { b.innerHTML = icon(b.dataset.icon); });
+['#me-play', '#s-play'].forEach(id => { $(id).innerHTML = icon('play'); });

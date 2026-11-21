@@ -11,7 +11,7 @@
   var stage = document.getElementById('stage'), cur = null, st = { pos: 0, dur: 0, playing: false };
   function emit(o) {
     try { if (window.Bridge) window.Bridge.postMessage(JSON.stringify(o)); } catch (e) {}
-    try { if (parent !== window) parent.postMessage({ syncpairEmbed: o }, '*'); } catch (e) {}
+    try { if (parent !== window) parent.postMessage({ syncpairEmbed: o }, location.origin); } catch (e) {}
   }
   function push() { emit({ t: 'state', pos: st.pos, dur: st.dur, playing: st.playing }); }
   function script(src, onload) { var s = document.createElement('script'); s.src = src; s.async = true; s.onload = onload; s.onerror = function () { emit({ t: 'error', msg: 'Could not load the player.' }); }; document.head.appendChild(s); }
