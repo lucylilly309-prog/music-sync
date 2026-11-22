@@ -139,6 +139,19 @@
       "partnerId": "u_94996b2c-cea3-429a-8701-abd82ddb4489",
       "recent": [
         {
+          "key": "lk:ln:spotify:3b21bba68686",
+          "trackId": null,
+          "provider": "spotify",
+          "ref": "spotify:track:4SqWKzw0CbA05TGszDgMlc",
+          "linkId": "ln:spotify:3b21bba68686",
+          "app": "",
+          "title": "i love you",
+          "artist": "",
+          "link": "https://open.spotify.com/track/4SqWKzw0CbA05TGszDgMlc",
+          "addedBy": "u_86b61c29-701a-440d-b373-c1bd99c7c3f0",
+          "playedAt": 1795295574714
+        },
+        {
           "key": "lk:ln:youtube:6fcb81205bde",
           "trackId": null,
           "provider": "youtube",
