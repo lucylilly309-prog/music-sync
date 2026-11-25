@@ -28,6 +28,8 @@ const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST'
     const manifest = await fetch(BASE + '/manifest.webmanifest');
     assert.strictEqual(manifest.status, 200); assert.match(manifest.headers.get('content-type'), /manifest\+json/);
     assert.strictEqual((await fetch(BASE + '/icon-192.png')).status, 200);
+    const sw = await fetch(BASE + '/sw.js');
+    assert.strictEqual(sw.status, 200); assert.match(sw.headers.get('content-type'), /javascript/); assert.strictEqual(sw.headers.get('cache-control'), 'no-cache', 'service worker is never cached by the browser');
     assert.strictEqual((await fetch(BASE + '/data.json')).status, 404, 'data file is never served');
     const badJson = await fetch(BASE + '/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{nope' });
     assert.strictEqual(badJson.status, 400); assert.ok((await badJson.json()).error, 'errors are JSON, not HTML');
@@ -64,12 +66,69 @@ const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST'
     assert.strictEqual(shared.favorites[0].title, 'Renamed');
     assert.strictEqual(shared.playlists[0].items.find(i => i.trackId === id).artist, 'Band');
 
+    // shared Up next queue: both partners edit it, entries are consumed once, deleted songs leave it
+    assert.ok((await call(sa, 'queue:add', { item: { trackId: id } })).ok);
+    assert.ok((await call(sb, 'queue:add', { item: { title: 'Yt', link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' } })).ok, 'partner can queue a link');
+    assert.strictEqual((await call(sa, 'queue:add', { item: { trackId: id } })).ok, false, 'no duplicates in Up next');
+    assert.strictEqual((await call(sa, 'queue:add', { item: { title: 'No link', artist: 'X' } })).ok, false, 'title-only songs cannot be queued');
+    assert.ok((await call(sb, 'queue:move', { key: id, direction: 1 })).ok, 'move the first entry down');
+    assert.strictEqual((await call(sb, 'queue:move', { key: id, direction: 1 })).ok, false, 'last entry cannot move down');
+    shared = await call(sa, 'shared:get', {});
+    assert.strictEqual(shared.queue.length, 2); assert.strictEqual(shared.queue[1].key, id, 'queue reordered');
+    const head = await call(sb, 'queue:shift', {});
+    assert.ok(head.ok && head.item.provider === 'youtube', 'shift returns the head link');
+    assert.strictEqual((await call(sa, 'shared:get', {})).queue.length, 1, 'shifted entry is gone for both');
+
+    // long-distance extras: time zone + status, shared countdown, pings
+    const gotProfile = once(sb, 'partner:profile');
+    assert.ok((await call(sa, 'profile:set', { tz: 'Africa/Tunis', status: { emoji: '😴', text: 'heading to bed' } })).ok);
+    const prof = await gotProfile; assert.strictEqual(prof.tz, 'Africa/Tunis'); assert.strictEqual(prof.status.text, 'heading to bed');
+    assert.strictEqual((await call(sa, 'profile:set', { tz: 'Mars/Olympus' })).tz, 'Africa/Tunis', 'invalid time zones are ignored');
+    assert.ok((await call(sb, 'us:set', { countdown: { date: '2027-01-15', label: 'Airport' }, since: '2024-05-01' })).ok);
+    assert.strictEqual((await call(sb, 'us:set', { countdown: { date: '2027-02-31', label: 'x' } })).ok, false, 'impossible dates are rejected');
+    shared = await call(sa, 'shared:get', {});
+    assert.strictEqual(shared.countdown.label, 'Airport'); assert.strictEqual(shared.since, '2024-05-01');
+    const gotPing = once(sb, 'ping:received');
+    assert.ok((await call(sa, 'ping:send', { kind: 'night' })).ok);
+    assert.strictEqual((await gotPing).kind, 'night', 'partner receives the ping live');
+    assert.strictEqual((await call(sa, 'ping:send', { kind: 'bomb' })).ok, false, 'unknown ping kinds are rejected');
+    assert.strictEqual((await call(sb, 'shared:get', {})).pings.length, 1, 'pings are kept as moments');
+
+    // staying signed in: cookie backup, and automatic restore after the server forgot the accounts
+    const crypto = require('crypto');
+    const reg = await fetch(BASE + '/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'cookie' }) });
+    const setCookie = reg.headers.get('set-cookie'), regBody = await reg.json();
+    assert.match(setCookie, /sp_session=[0-9a-f]{64}/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Max-Age=31536000/);
+    const sess = await fetch(BASE + '/api/session', { headers: { Cookie: setCookie.split(';')[0] } });
+    assert.strictEqual(sess.status, 200); const sessBody = await sess.json();
+    assert.strictEqual(sessBody.userId, regBody.userId); assert.strictEqual(sessBody.token, regBody.token);
+    assert.strictEqual((await fetch(BASE + '/api/session')).status, 401, 'no cookie, no session');
+    const post = (url, body) => fetch(BASE + url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(async r => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+    const mk = () => ({ userId: 'u_' + crypto.randomUUID(), token: crypto.randomBytes(32).toString('hex') });
+    const rA = mk(), rB = mk(), rC = mk();
+    const ra = await post('/api/restore', { ...rA, name: 'Ra', code: 'ABC123', partnerId: rB.userId });
+    assert.strictEqual(ra.status, 200); assert.strictEqual(ra.body.restored, true); assert.strictEqual(ra.body.partnerId, null, 'partner has not come back yet');
+    const sRa = await connect(rA.token); // the restored token works for sockets
+    assert.strictEqual((await post('/api/restore', { ...rA, name: 'Ra' })).body.restored, false, 'restoring twice is harmless');
+    assert.strictEqual((await post('/api/restore', { userId: rA.userId, token: mk().token })).status, 409, 'cannot take over an existing account id');
+    assert.strictEqual((await post('/api/restore', { userId: 'nope', token: rA.token })).status, 400, 'invalid ids are rejected');
+    const rb = await post('/api/restore', { ...rB, name: 'Rb', code: 'DEF456', partnerId: rA.userId });
+    assert.strictEqual(rb.body.partnerId, rA.userId, 'couple is re-linked once both sides claim each other');
+    const sRb = await connect(rB.token);
+    assert.ok(Array.isArray((await call(sRb, 'shared:get', {})).favorites), 'restored partner can use shared data');
+    assert.ok(Array.isArray((await call(sRa, 'shared:get', {})).favorites));
+    assert.strictEqual((await post('/api/restore', { ...rC, name: 'Rc', partnerId: rA.userId })).body.partnerId, null, 'a one-sided claim never pairs');
+    sRa.close(); sRb.close();
+
     // only the uploader may delete; delete purges every reference and the file
     assert.strictEqual((await api(B.token, 'DELETE', '/api/library/' + id)).status, 403);
     const file = fs.readdirSync(path.join(DATA_DIR, 'music'))[0]; assert.ok(file);
     assert.strictEqual((await api(A.token, 'DELETE', '/api/library/' + id)).status, 200);
     shared = await call(sa, 'shared:get', {});
     assert.strictEqual(shared.favorites.length, 0); assert.strictEqual(shared.playlists[0].items.length, 1);
+    assert.strictEqual(shared.queue.length, 0, 'deleted song leaves Up next');
+    assert.ok((await call(sa, 'queue:add', { item: { title: 'Yt2', link: 'https://www.youtube.com/watch?v=abcdefghijk' } })).ok);
+    assert.ok((await call(sb, 'queue:clear', {})).ok); assert.strictEqual((await call(sa, 'queue:shift', {})).item, null, 'cleared queue is empty');
     assert.strictEqual(fs.readdirSync(path.join(DATA_DIR, 'music')).length, 0);
     assert.strictEqual((await api(B.token, 'GET', '/api/library')).body.length, 0);
 

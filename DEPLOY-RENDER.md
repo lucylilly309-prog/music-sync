@@ -10,6 +10,8 @@
 8. Deploy and verify `https://YOUR-SERVICE.onrender.com/health` returns `{"ok":true,...}`.
 9. Enter that HTTPS URL in SyncPair on both phones.
 
+**If people keep getting signed out:** open `/health`. `"persistentStorage": false` means the server is running on Render without `DATA_DIR`, so every restart, idle spin-down and deploy wipes `data.json` and `music/`. Accounts and pairing now restore themselves automatically (see *Staying signed in* in the README), but songs, playlists and notes are lost each time until a disk is attached. A free Render instance cannot attach a disk; use a paid instance with a disk, or another host that offers a persistent volume.
+
 Do not use ephemeral storage for uploaded audio or user data: without the persistent disk, every deploy erases all accounts and music (clients will then show "saved account was not found" and ask people to sign up again).
 
 Already in place: token-authenticated library and audio access, per-file (50 MB) and per-couple (250 MB) limits, request rate limits and atomic data writes with a rolling backup. Still recommended before wider use: a real database, off-disk backups, audio file validation and abuse reporting.

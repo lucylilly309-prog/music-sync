@@ -95,7 +95,10 @@ function rateLimit(max, windowMs) {
     arr.push(now); hits.set(key, arr); next();
   };
 }
-app.get('/health', (_req, res) => res.json({ ok: true, time: Date.now() }));
+// Render's filesystem is wiped on every restart, spin-down and deploy unless a disk is mounted and DATA_DIR points at it.
+const EPHEMERAL_HOST = !!process.env.RENDER && !process.env.DATA_DIR;
+if (EPHEMERAL_HOST) console.warn('WARNING: running on Render without DATA_DIR. Accounts, playlists and music are lost on every restart. Attach a persistent disk and set DATA_DIR (see DEPLOY-RENDER.md).');
+app.get('/health', (_req, res) => res.json({ ok: true, time: Date.now(), persistentStorage: !EPHEMERAL_HOST }));
 app.get('/api/library', requireAuth, (req, res) => res.json([...tracks.values()].filter(t => canSee(req.user.id, t)).map(t => pubTrack(t, req.user.id))));
 app.post('/api/library', rateLimit(12, 60 * 60 * 1000), requireAuth, express.raw({ type: '*/*', limit: '50mb' }), (req, res) => {
   if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: 'Choose a non-empty audio file.' });
@@ -141,7 +144,7 @@ app.patch('/api/library/:id', requireAuth, (req, res) => {
   t.title = title; t.artist = artist;
   // Favorites, playlists and history keep a copy of the title; keep those copies in step.
   const sync = i => { if (i.trackId === t.id) { i.title = title; i.artist = artist; } };
-  pairs.forEach(d => { (d.favorites || []).forEach(sync); (d.playlists || []).forEach(pl => (pl.items || []).forEach(sync)); });
+  pairs.forEach(d => { (d.favorites || []).forEach(sync); (d.queue || []).forEach(sync); (d.playlists || []).forEach(pl => (pl.items || []).forEach(sync)); });
   users.forEach(u => (u.recent || []).forEach(sync));
   saveData(); notifyLibrary(req.user.id); pushSharedFor(req.user.id);
   res.json(pubTrack(t, req.user.id));
@@ -154,7 +157,7 @@ app.delete('/api/library/:id', requireAuth, (req, res) => {
   tracks.delete(t.id);
   try { fs.unlinkSync(path.join(MUSIC_DIR, path.basename(t.url))); } catch {}
   const keep = i => i.trackId !== t.id;
-  pairs.forEach(d => { d.favorites = (d.favorites || []).filter(keep); (d.playlists || []).forEach(pl => { pl.items = (pl.items || []).filter(keep); }); });
+  pairs.forEach(d => { d.favorites = (d.favorites || []).filter(keep); d.queue = (d.queue || []).filter(keep); (d.playlists || []).forEach(pl => { pl.items = (pl.items || []).filter(keep); }); });
   users.forEach(u => { if (u.recent) u.recent = u.recent.filter(keep); });
   saveData(); notifyLibrary(req.user.id); pushSharedFor(req.user.id);
   res.json({ ok: true });
@@ -176,21 +179,22 @@ app.get('/music/:file', (req, res) => {
 const STATIC_FILES = {
   '/': ['index.html'], '/app.js': ['app.js'], '/embed.html': ['embed.html'], '/style.css': ['style.css'],
   '/manifest.webmanifest': ['manifest.webmanifest', 'application/manifest+json'],
+  '/sw.js': ['sw.js', 'application/javascript'],
   '/icon-192.png': ['icon-192.png'], '/icon-512.png': ['icon-512.png'], '/apple-touch-icon.png': ['apple-touch-icon.png'],
 };
 for (const [route, [file, type]] of Object.entries(STATIC_FILES)) {
-  app.get(route, (_req, res) => { if (type) res.type(type); res.sendFile(path.join(ROOT, file)); });
+  app.get(route, (_req, res) => { if (type) res.type(type); if (route === '/sw.js') res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(ROOT, file)); });
 }
 const server = http.createServer(app);
 const io = new Server(server);
 const rand = (n = 6) => crypto.randomBytes(Math.ceil(n / 2)).toString('hex').slice(0, n).toUpperCase();
-const publicUser = u => ({ id: u.id, name: u.name, online: !!u.online });
+const publicUser = u => ({ id: u.id, name: u.name, online: !!u.online, tz: u.tz || '', status: u.status || null });
 const partnerOf = uid => { const u = users.get(uid); return u?.partnerId ? users.get(u.partnerId) : null; };
 // A library track belongs to the account that uploaded it and is shared with that account's partner only.
 const canSee = (uid, t) => !!t && !!t.uploadedBy && (t.uploadedBy === uid || partnerOf(uid)?.id === t.uploadedBy);
 const visibleTrack = (uid, id) => { const t = id ? tracks.get(String(id)) : null; return canSee(uid, t) ? t : null; };
 const pubTrack = (t, uid) => { if (!t) return t; const { hash, uploadedBy, ...pub } = t; if (uid) pub.mine = uploadedBy === uid; return pub; };
-const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [], roomName: pr.data.roomName || '' });
+const sharedPayload = pr => ({ favorites: pr.data.favorites, playlists: pr.data.playlists, notes: pr.data.notes || [], roomName: pr.data.roomName || '', queue: pr.data.queue || [], countdown: pr.data.countdown || null, since: pr.data.since || '', pings: (pr.data.pings || []).slice(-10) });
 const notifyPartner = (uid, event) => { const p = partnerOf(uid); if (p) io.to('user:' + p.id).emit(event); };
 const notifyLibrary = uid => { io.to('user:' + uid).emit('library:changed'); notifyPartner(uid, 'library:changed'); };
 // Push the couple's shared lists (and each person's history) after a change made outside a socket handler.
@@ -244,9 +248,11 @@ const pairKey = (a, b) => [a, b].sort().join(':');
 function pairOf(uid) {
   const partner = partnerOf(uid); if (!partner) return null;
   const key = pairKey(uid, partner.id);
-  if (!pairs.has(key)) pairs.set(key, { favorites: [], playlists: [], notes: [] });
+  if (!pairs.has(key)) pairs.set(key, { favorites: [], playlists: [], notes: [], queue: [], countdown: null, since: '', pings: [] });
   const data = pairs.get(key);
   if (!Array.isArray(data.notes)) data.notes = []; // migrate existing pair data
+  if (!Array.isArray(data.queue)) data.queue = [];
+  if (!Array.isArray(data.pings)) data.pings = [];
   return { key, data, partner };
 }
 // Normalises a song reference: either a library track (trackId) or metadata-only (shared from any player).
@@ -265,11 +271,52 @@ function cleanItem(i, uid) {
 }
 function activeSessionOf(uid) { return [...sessions.values()].find(s => s.active && (s.a === uid || s.b === uid)) || null; }
 
+// ---- Staying signed in ----
+// The token lives in the browser's localStorage AND in an HttpOnly cookie, so clearing one does not log anyone out.
+// If the server itself forgot the account (data reset), /api/restore re-creates it from what the phone still holds.
+const cookieToken = req => (String(req.headers.cookie || '').match(/(?:^|;\s*)sp_session=([0-9a-f]{64})/i) || [])[1] || '';
+function setSessionCookie(req, res, token) {
+  res.append('Set-Cookie', `sp_session=${token}; Max-Age=${365 * 24 * 3600}; Path=/; HttpOnly; SameSite=Lax${req.secure ? '; Secure' : ''}`);
+}
+app.get('/api/session', rateLimit(60, 60 * 60 * 1000), (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const token = cookieToken(req), u = userForToken(token);
+  if (!u) return res.status(401).json({ error: 'No saved session.' });
+  setSessionCookie(req, res, token);
+  res.json({ userId: u.id, token, code: u.code, name: u.name, partnerId: u.partnerId || null });
+});
+app.post('/api/restore', rateLimit(30, 60 * 60 * 1000), (req, res) => {
+  const b = req.body || {}, id = String(b.userId || ''), token = String(b.token || '');
+  if (!/^u_[0-9a-f-]{36}$/i.test(id) || !/^[0-9a-f]{64}$/i.test(token)) return res.status(400).json({ error: 'Invalid account data.' });
+  const hash = tokenHash(token), existing = users.get(id);
+  let user = existing;
+  if (existing) {
+    if (existing.tokenHash !== hash) return res.status(409).json({ error: 'This account id belongs to someone else.' });
+  } else {
+    if (tokenIndex.has(hash)) return res.status(409).json({ error: 'This sign-in is already in use.' });
+    let code = String(b.code || '').toUpperCase();
+    if (!/^[0-9A-F]{6}$/.test(code) || [...users.values()].some(u => u.code === code)) code = rand();
+    user = { id, name: String(b.name || 'Listener').trim().slice(0, 30) || 'Listener', tokenHash: hash, code, partnerId: null, online: false };
+    users.set(id, user); tokenIndex.set(hash, id);
+  }
+  // Re-link the couple only when both sides claim each other, each proving itself with its own token.
+  const pid = String(b.partnerId || '');
+  if (!user.partnerId && pid && pid !== id) {
+    const other = users.get(pid);
+    if (other && (other.partnerId === id || (!other.partnerId && other.wantsPartner === id))) {
+      user.partnerId = pid; other.partnerId = id; delete user.wantsPartner; delete other.wantsPartner;
+    } else if (!other) user.wantsPartner = pid;
+  }
+  saveData(); setSessionCookie(req, res, token);
+  res.json({ userId: user.id, token, code: user.code, name: user.name, partnerId: user.partnerId || null, restored: !existing });
+});
+
 app.post('/api/users', rateLimit(10, 60 * 60 * 1000), (req, res) => {
   const name = String(req.body?.name || 'Listener').trim().slice(0, 30) || 'Listener';
   const token = crypto.randomBytes(32).toString('hex');
   const user = { id: 'u_' + crypto.randomUUID(), name, tokenHash: tokenHash(token), code: rand(), partnerId: null, online: false };
   users.set(user.id, user); tokenIndex.set(user.tokenHash, user.id); saveData();
+  setSessionCookie(req, res, token);
   res.status(201).json({ userId: user.id, token, code: user.code, name: user.name });
 });
 
@@ -416,6 +463,78 @@ io.on('connection', socket => {
   limited('playlist:delete', 10, 60_000, (p = {}, ack = () => {}) => {
     const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
     pr.data.playlists = pr.data.playlists.filter(x => x.id !== p.id); pushShared(pr); ack({ ok: true });
+  });
+  // ---- Long-distance extras: each person's time zone + status, a shared countdown, and one-tap "thinking of you" pings ----
+  const validTz = tz => { try { new Intl.DateTimeFormat('en', { timeZone: tz }); return true; } catch { return false; } };
+  const validDay = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s + 'T00:00:00Z')) && new Date(s + 'T00:00:00Z').toISOString().slice(0, 10) === s;
+  limited('profile:set', 20, 60_000, (p = {}, ack = () => {}) => {
+    if (typeof p.tz === 'string' && p.tz && p.tz.length <= 64 && validTz(p.tz)) me.tz = p.tz;
+    if (p.status && typeof p.status === 'object') {
+      const text = String(p.status.text || '').trim().slice(0, 60), emoji = String(p.status.emoji || '').slice(0, 8);
+      me.status = text || emoji ? { emoji, text, at: Date.now() } : null;
+    }
+    saveData();
+    const partner = partnerOf(me.id);
+    if (partner) io.to('user:' + partner.id).emit('partner:profile', { tz: me.tz || '', status: me.status || null });
+    ack({ ok: true, tz: me.tz || '', status: me.status || null });
+  });
+  limited('us:set', 20, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    if ('countdown' in p) {
+      if (!p.countdown) pr.data.countdown = null;
+      else {
+        const date = String(p.countdown.date || ''), label = String(p.countdown.label || '').trim().slice(0, 50);
+        if (!validDay(date)) return ack({ ok: false, error: 'Pick a valid date.' });
+        pr.data.countdown = { date, label: label || 'Seeing each other', by: me.id };
+      }
+    }
+    if ('since' in p) {
+      const since = String(p.since || '');
+      if (since && !validDay(since)) return ack({ ok: false, error: 'Pick a valid start date.' });
+      pr.data.since = since;
+    }
+    pushShared(pr); ack({ ok: true });
+  });
+  const PING_KINDS = ['think', 'miss', 'morning', 'night'];
+  limited('ping:send', 20, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const kind = String(p.kind || ''); if (!PING_KINDS.includes(kind)) return ack({ ok: false, error: 'Unknown message.' });
+    const ping = { from: me.id, fromName: me.name, kind, at: Date.now() };
+    pr.data.pings = [...(pr.data.pings || []), ping].slice(-30);
+    pushShared(pr);
+    io.to('user:' + pr.partner.id).emit('ping:received', ping);
+    ack({ ok: true, delivered: !!pr.partner.online });
+  });
+  // Shared "Up next" queue. Either partner can add, reorder or remove; during a session the leader takes the head
+  // when a song ends (queue:shift removes it atomically, so both phones never consume the same entry twice).
+  limited('queue:add', 30, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const item = cleanItem(p.item, me.id); if (!item) return ack({ ok: false, error: 'Invalid song.' });
+    if (!item.trackId && !item.provider) return ack({ ok: false, error: 'Queue an uploaded song or a link (title-only songs cannot be played together).' });
+    const q = pr.data.queue;
+    if (q.some(x => x.key === item.key)) return ack({ ok: false, error: 'Already in Up next.' });
+    if (q.length >= 100) return ack({ ok: false, error: 'Up next is full.' });
+    q.push(item); pushShared(pr); ack({ ok: true });
+  });
+  limited('queue:remove', 30, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    pr.data.queue = pr.data.queue.filter(x => x.key !== p.key); pushShared(pr); ack({ ok: true });
+  });
+  limited('queue:move', 60, 60_000, (p = {}, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const q = pr.data.queue, from = q.findIndex(x => x.key === p.key), to = from + (Number(p.direction) < 0 ? -1 : 1);
+    if (from < 0 || to < 0 || to >= q.length) return ack({ ok: false, error: 'Cannot move it further.' });
+    [q[from], q[to]] = [q[to], q[from]]; pushShared(pr); ack({ ok: true });
+  });
+  limited('queue:clear', 10, 60_000, (_p, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    pr.data.queue = []; pushShared(pr); ack({ ok: true });
+  });
+  limited('queue:shift', 30, 60_000, (_p, ack = () => {}) => {
+    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
+    const item = pr.data.queue.shift() || null;
+    if (item) pushShared(pr);
+    ack({ ok: true, item });
   });
   // Invite the partner to listen to a song. Library tracks open a synced session; songs shared from any
   // other player (metadata only) arrive as a suggestion the partner can favorite or look up.

@@ -62,6 +62,39 @@ Style tab: theme presets and custom colors, plus *Fine-tune the look* (alignment
 
 The home screen has a bottom tab bar (Home · Library · Playlists · Style) and a mini-player that keeps the current song controllable from any tab. Link players (YouTube / Spotify / SoundCloud) must stay visible to play, so loading one jumps back to Home. The last tab is remembered per device.
 
+## Up next (shared queue)
+
+Tap **＋ Next** on any library song, favorite, playlist entry or link (or *Up next* in a library row's ⋯ menu) to add it to the couple's shared queue on Home. Either partner can reorder or remove entries, and it updates live on both phones.
+
+- In a listening session, **Next** (and the end of a song) plays the head of Up next first; the queue entry is removed on the server in one step (`queue:shift`), so the two phones never consume the same song twice. When Up next is empty, playback resumes from the library or playlist where it left off.
+- Outside a session, **▶ Play together** takes the head, opens a session with it, and the rest plays as songs end.
+- Only uploaded songs and links can be queued (title-only suggestions cannot be played together). Limit: 100 entries. Deleting or renaming a library song updates the queue too.
+
+## Staying signed in
+
+- The account token is kept in `localStorage` **and** in a one-year `HttpOnly` cookie (`sp_session`). If the browser clears one, `GET /api/session` brings the account back from the other. The app also asks the browser for persistent storage.
+- If the **server** forgets the account (its data was reset), the app no longer logs you out: it calls `POST /api/restore` with the id and token the phone still holds, and the server re-creates the account. The couple is re-linked automatically once **both** phones have restored (each claims the other, each proves itself with its own token).
+- A restore cannot bring back what only lived on the server (uploaded songs, shared playlists, notes). Check `GET /health`: `persistentStorage: false` means the host is wiping data. Fix it with a persistent disk and `DATA_DIR` (see `DEPLOY-RENDER.md`); the server also logs a warning at startup when it detects Render without `DATA_DIR`.
+- Only a refused restore (the account id is taken by a different token) sends you back to sign-up.
+
+## Long-distance extras (the "Us" card on Home)
+
+- **Partner's local time:** each phone reports its time zone; the card shows their clock, the hour difference, and 🌙 "probably asleep" between 23:00 and 06:00 their time.
+- **Status:** an emoji + up to 60 characters ("on the bus", "heading to bed"), shown on the partner's card live.
+- **Countdown to the next visit** and **days together:** set once, shared and editable by both. The countdown shows "N days until …", "Today", or prompts for the next date once it has passed.
+- **One-tap pings:** 💗 Thinking of you, 🥺 Miss you, ☀️ Good morning, 🌙 Good night. The partner gets a toast and a short vibration if the app is open; the last pings stay visible as moments so nothing is lost while they are away. (Delivery while the app is closed needs push notifications, which are not built yet.)
+- Server events: `profile:set`, `partner:profile`, `us:set`, `ping:send`, `ping:received`; countdown, since-date and the last 10 pings travel in the shared payload.
+
+## Listen along, sync tuning, reconnects
+
+- **Listen along from here:** when your partner is playing a song you can also play (a shared-library track or a link) and you are not in a session, their card on Home shows a button. It sends them an invite and starts the song at their current position.
+- **Sync tuning (Style tab):** Bluetooth headphones add 100–300 ms of delay. *Headphone delay* makes this phone play slightly ahead of the partner's clock (applies to controls and drift correction that come from the partner, never to your own). Saved per device.
+- **Reconnects:** the app shows "Connection lost. Reconnecting…" and "Back online." instead of failing silently, and reloads the library on recovery. A phone that rejoins a live session is re-synced by the partner's phone automatically (`session:resume` + `session:peer-joined`).
+
+## Offline shell (service worker)
+
+`sw.js` caches the app shell (page, script, styles, icons, Socket.IO client) and serves the last good copy if the network is down, so the app opens instantly and survives a flaky connection. It never touches `/api`, `/music` or the Socket.IO transport: live sync, uploads and audio streaming still need the server. Bump the `?v=` on `style.css` / `app.js` in `index.html` and `VERSION` in `sw.js` together on each release.
+
 ## Install on your phone and lock-screen controls (web client)
 
 - **Add to Home Screen** (iOS Safari: Share → Add to Home Screen; Android Chrome: menu → Install app). The server publishes a web manifest and icons, so SyncPair opens full-screen like an app.

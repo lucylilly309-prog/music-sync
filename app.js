@@ -11,16 +11,22 @@ const ICONS = {
 };
 const icon = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
 const audio = $('#audio-player');
-const me = { id: null, name: '', token: null, code: null };
+const me = { id: null, name: '', token: null, code: null, partnerId: null };
+let restoring = false, restoreTries = 0;
+function saveAccount() { try { localStorage.setItem('syncpair-account', JSON.stringify(me)); } catch {} }
 let socket = null, partner = null, partnerState = null, partnerOnline = false;
 let session = null, pendingInvite = null, lastControl = null;
 let library = [], serverOffset = 0, isApplyingRemote = false;
 let seekDragging = false, lastLocalControlAt = 0;
 let lastCorrection = 0, wantPlaying = false, lastPlayCmd = 0, playRetries = 0;
 let recent = [], lastRecent = { id: null, at: 0 };
-let shared = { favorites: [], playlists: [], notes: [], roomName: '' }, queue = null, pendingItem = null, suggestion = null;
+let shared = { favorites: [], playlists: [], notes: [], roomName: '', queue: [], countdown: null, since: '', pings: [] }, queue = null, lastListId = null, pendingItem = null, suggestion = null;
 let shuffleOn = false, repeatMode = 'off', sleepDeadline = 0, sleepAtTrackEnd = false, sleepInterval = null;
+let latencyMs = 0; try { latencyMs = Math.max(-500, Math.min(1500, Number(localStorage.getItem('syncpair-latency')) || 0)); } catch {}
+let wasDown = false;
 let noteDraft = ''; // text typed in the note box; survives re-renders of the partner card
+
+const sharedFrom = s => ({ favorites: s.favorites || [], playlists: s.playlists || [], notes: s.notes || [], roomName: s.roomName || '', queue: s.queue || [], countdown: s.countdown || null, since: s.since || '', pings: s.pings || [] });
 
 // Non-blocking message (replaces notify(), which freezes the page and the audio UI on phones).
 let toastTimer = null;
@@ -214,23 +220,26 @@ async function createAccount(name) {
 }
 function connectMine(token) {
   socket = io({ auth: { token } });
-  socket.on('connect', () => { refreshShared(); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
+  socket.on('disconnect', () => { wasDown = true; if (session) $('#session-status').textContent = 'Connection lost. Reconnecting…'; notify('Connection lost. Reconnecting…'); });
+  socket.on('connect', () => { restoreTries = 0; if (wasDown) { wasDown = false; notify('Back online.'); refreshLibrary().catch(() => {}); } refreshShared(); socket.emit('profile:set', { tz: myTz() }, r => { if (r?.ok) { myStatus = r.status; fillStatusInputs(); renderUs(); } }); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
   socket.on('library:changed', () => refreshLibrary().catch(() => {}));
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
-  socket.on('shared:update', st => { shared = { favorites: st.favorites || [], playlists: st.playlists || [], notes: st.notes || [], roomName: st.roomName || '' }; renderShared(); renderLibrary(); renderPartnerCard(); });
+  socket.on('shared:update', st => { shared = sharedFrom(st); renderShared(); renderLibrary(); renderPartnerCard(); });
   socket.on('track:suggest', s => { suggestion = s; renderSuggestBanner(); });
   socket.on('connect_error', err => {
     // The server no longer knows this token (data reset, or a different server). Retrying can never work, so
     // return to sign-up instead of leaving the person on a pair screen that silently does nothing.
-    if (/^Authentication failed/i.test(err.message || '')) { resetAccount('Your saved account was not found on this server (it may have been reset). Create a new account to continue.'); return; }
+    if (/^Authentication failed/i.test(err.message || '')) { restoreAccount(); return; }
     $('#upload-status').textContent = err.message;
   });
   socket.on('clock:sync', ({ serverTime }) => { serverOffset = serverTime - Date.now(); });
-  socket.on('partner:info', p => { partner = p; partnerOnline = !!p.online; renderHome(); refreshShared(); });
+  socket.on('partner:info', p => { partner = p; partnerOnline = !!p.online; if (me.partnerId !== p.id) { me.partnerId = p.id; saveAccount(); } renderHome(); refreshShared(); });
   socket.on('partner:presence', ({ online }) => { partnerOnline = !!online; renderPresence(); renderPartnerCard(); });
   socket.on('partner:state', st => { partnerState = st; renderPartnerNow(); });
+  socket.on('partner:profile', p => { if (partner) { partner.tz = p?.tz || ''; partner.status = p?.status || null; renderUs(); } });
+  socket.on('ping:received', p => { const [e, label] = PINGS[p?.kind] || ['💗', 'is thinking of you']; notify(`${p?.fromName || 'Your partner'} ${e} ${label}`); try { navigator.vibrate?.([80, 60, 80]); } catch {} if (session) floatEmoji(e); });
   socket.on('session:invite', ({ session: incoming, from, item }) => { pendingInvite = incoming; pendingItem = item || null; refreshLibrary().catch(() => {}); renderInviteBanner(from); });
-  socket.on('session:started', ({ session: started }) => { session = started; pendingInvite = null; pendingItem = null; enterSession(); });
+  socket.on('session:started', ({ session: started }) => { session = started; pendingInvite = null; pendingItem = null; enterSession(); renderPartnerNow(); });
   socket.on('session:resume', ({ session: resumed }) => { session = resumed; enterSession(); });
   socket.on('session:ended', () => { session = null; pendingInvite = null; lastControl = null; show('#screen-home'); renderHome(); });
   socket.on('session:control', applyControl);
@@ -240,6 +249,22 @@ function connectMine(token) {
   });
   socket.on('react', r => { floatEmoji(r.emoji); safeLog(`${r.from} reacted ${r.emoji} at ${fmt(r.positionMs)}`); });
   socket.on('chat', m => safeLog(m.text, `${m.from}: `));
+}
+// The server no longer knows this token (its data was reset). Re-register the same account instead of logging out;
+// the server re-links the couple once both phones have done this. Only a refused restore sends you back to sign-up.
+async function restoreAccount() {
+  const fail = () => resetAccount('Your saved account was not found on this server (it may have been reset). Create a new account to continue.');
+  if (restoring) return;
+  if (restoreTries >= 2 || !me.id || !me.token) return fail();
+  restoring = true; restoreTries++;
+  try {
+    const r = await fetch('/api/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: me.id, token: me.token, name: me.name, code: me.code, partnerId: me.partnerId }) });
+    const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || 'Restore refused.');
+    Object.assign(me, { id: data.userId, name: data.name, code: data.code, partnerId: data.partnerId || me.partnerId || null }); saveAccount();
+    $('#my-code').textContent = me.code;
+    socket?.close(); connectMine(me.token); refreshLibrary().catch(() => {});
+    if (data.restored) notify('The server was reset, so you were signed back in automatically. Songs, playlists and notes saved on the server are gone.' + (me.partnerId && !data.partnerId ? ' Your partner is linked again as soon as they open the app.' : ''));
+  } catch { fail(); } finally { restoring = false; }
 }
 function resetAccount(message) {
   try { localStorage.removeItem('syncpair-account'); } catch {}
@@ -255,7 +280,7 @@ function renderPresence() {
 }
 function renderHome() {
   $('#me-name').textContent = me.name;
-  renderPresence(); renderPartnerCard(); renderPlayer(); renderInviteBanner();
+  renderPresence(); renderPartnerCard(); renderUs(); renderPlayer(); renderInviteBanner();
   show('#screen-home');
 }
 function renderPartnerCard() {
@@ -354,6 +379,18 @@ function renderPartnerCard() {
 }
 // The partner's "in their headphones" block is refreshed in place (it changes every few seconds), so typing a
 // note is never interrupted by the partner's playback updates.
+// What the partner is playing, as a song we can also play (a shared-library track or a link), and where they are in it.
+function alongItemFor(st) {
+  const t = st?.track; if (!t) return null;
+  if (library.some(x => x.id === t.id)) return { trackId: t.id };
+  if (t.link && /^https?:\/\//i.test(t.link)) return { title: t.title, artist: t.artist || '', link: t.link };
+  return null;
+}
+function partnerPositionMs() {
+  if (!partnerState) return 0;
+  const elapsed = partnerState.isPlaying ? Math.max(0, Date.now() + serverOffset - (partnerState.serverTime || Date.now())) : 0;
+  return Math.max(0, Math.round((partnerState.positionMs || 0) + elapsed));
+}
 function renderPartnerNow() {
   const slot = $('#partner-card .profile-now-slot'); if (!slot) return;
   slot.replaceChildren();
@@ -367,7 +404,10 @@ function renderPartnerNow() {
   const artist = document.createElement('p'); artist.className = 'dim small'; artist.textContent = partnerState.track.artist;
   const playing = document.createElement('p'); playing.className = 'small ' + (partnerState.isPlaying ? 'live' : 'dim');
   playing.textContent = partnerState.isPlaying ? '♫ Listening now' : 'Ⅱ Taking a pause';
-  info.append(title, artist, playing); row.append(art, info); now.append(kicker, row); slot.append(now);
+  info.append(title, artist, playing); row.append(art, info); now.append(kicker, row);
+  const along = !session && partnerState.isPlaying ? alongItemFor(partnerState) : null;
+  if (along) { const b = document.createElement('button'); b.className = 'primary listen-along'; b.textContent = '🎧 Listen along from here'; b.onclick = () => inviteToListen(along, partnerPositionMs()); now.append(b); }
+  slot.append(now);
 }
 function renderInviteBanner(from) {
   const banner = $('#invite-banner'); banner.replaceChildren();
@@ -438,7 +478,7 @@ function renderLibrary() {
     const item = { trackId: track.id };
     const menu = document.createElement('div'); menu.className = 'row-more hidden';
     const item2 = (name, label, fn) => { const b = document.createElement('button'); b.className = 'mini wide'; b.innerHTML = icon(name) + '<span></span>'; b.lastChild.textContent = label; b.onclick = () => { menu.classList.add('hidden'); fn(); }; return b; };
-    menu.append(item2('plus', 'Playlist', () => addToPlaylist(item)), item2('send', 'Invite', () => inviteToListen(item)), item2('edit', 'Edit', () => editTrack(track)), ...(track.mine ? [item2('trash', 'Delete', () => deleteTrack(track))] : []));
+    menu.append(item2('plus', 'Playlist', () => addToPlaylist(item)), item2('music', 'Up next', () => queueAdd(item)), item2('send', 'Invite', () => inviteToListen(item)), item2('edit', 'Edit', () => editTrack(track)), ...(track.mine ? [item2('trash', 'Delete', () => deleteTrack(track))] : []));
     const more = mini('more', 'More actions', () => { const open = menu.classList.toggle('hidden'); more.setAttribute('aria-expanded', String(!open)); });
     more.setAttribute('aria-expanded', 'false');
     actions.append(mini(isFav(item) ? '♥' : '♡', 'Favorite together', () => toggleFav(item)), more, play);
@@ -508,9 +548,17 @@ async function selectTrack(track, autoplay = false, positionMs = 0) {
 }
 function currentIndex() { return library.findIndex(t => t.id === player.track?.id); }
 async function skip(direction) {
+  // In a session, "next" (or the end of a song) plays the shared Up next queue first.
+  if (direction > 0 && session && repeatMode !== 'one') {
+    for (let item = await takeNextQueued(); item; item = await takeNextQueued()) {
+      const t = playableFromItem(item) || (item.provider ? trackFromItem(item) : null);
+      if (t) return selectTrack(t, true);
+    }
+  }
   const list = queue?.length ? queue : library;
   if (!list.length) { $('#player-status').textContent = 'Upload music before playing.'; return; }
-  const index = list.findIndex(t => t.id === player.track?.id);
+  let index = list.findIndex(t => t.id === player.track?.id);
+  if (index < 0 && lastListId) index = list.findIndex(t => t.id === lastListId); // after a queued song, resume where the list left off
   if (direction > 0 && repeatMode === 'one' && index >= 0) return selectTrack(list[index], true);
   if (direction > 0 && repeatMode === 'off' && !shuffleOn && index === list.length - 1) { player.pause(); player.seek(0); renderPlayer(true); $('#player-status').textContent = 'Playlist finished.'; return; }
   let next;
@@ -518,6 +566,7 @@ async function skip(direction) {
     const choices = list.map((_, i) => i).filter(i => i !== index);
     next = choices[Math.floor(Math.random() * choices.length)];
   } else next = (index < 0 ? 0 : (index + direction + list.length) % list.length);
+  lastListId = list[next].id;
   await selectTrack(list[next], true);
 }
 // When a song ends during a session, both phones used to advance on their own. With shuffle on they picked
@@ -570,10 +619,10 @@ async function applyControl(control) {
   isApplyingRemote = true;
   const elapsed = Math.max(0, Date.now() + serverOffset - control.serverTime);
   const moving = control.type === 'play' || control.type === 'skip' || (control.type === 'sync' && control.isPlaying);
-  const position = control.positionMs + (moving ? elapsed : 0);
+  const position = control.positionMs + (moving ? elapsed + latencyMs : 0);
   try {
     if (player.track?.id !== track.id) await player.load(track, position, false);
-    player.seek(control.positionMs + (moving ? Math.max(0, Date.now() + serverOffset - control.serverTime) : 0));
+    player.seek(control.positionMs + (moving ? Math.max(0, Date.now() + serverOffset - control.serverTime) + latencyMs : 0));
     if (control.type === 'pause') player.pause();
     else if (moving) await player.play();
     lastControl = control;
@@ -626,7 +675,7 @@ setInterval(() => {
   if (stalled && !noGesture && playRetries < 3) { playRetries++; lastPlayCmd = Date.now(); if (isEmbed(player.track)) embedSend({ t: 'play' }); else audio.play().catch(() => {}); safeLog(`↻ player was not playing, retrying (${playRetries}/3)`); }
   $('#tap-play').classList.toggle('hidden', !(waiting && (noGesture || playRetries >= 1))); // a real tap always unlocks playback
   if (session && player.playing && lastControl && lastControl.type !== 'pause') {
-    const expected = lastControl.positionMs + Math.max(0, Date.now() + serverOffset - lastControl.serverTime);
+    const expected = lastControl.positionMs + Math.max(0, Date.now() + serverOffset - lastControl.serverTime) + (lastControl.from && lastControl.from !== me.id ? latencyMs : 0);
     const drift = expected - player.pos();
     if (Math.abs(drift) > (isLinkTrack(player.track) ? 2000 : 750) && Date.now() - lastCorrection > 5000) { lastCorrection = Date.now(); player.seek(expected); safeLog(`↻ corrected playback drift (${Math.round(drift)} ms)`); }
   }
@@ -637,7 +686,7 @@ $('#btn-create').onclick = async () => {
   try {
     const account = await createAccount($('#inp-name').value.trim() || 'Listener');
     Object.assign(me, { id: account.userId, name: account.name, token: account.token, code: account.code });
-    localStorage.setItem('syncpair-account', JSON.stringify(me));
+    saveAccount();
     $('#my-code').textContent = me.code; $('#create-box').classList.add('hidden'); $('#pair-box').classList.remove('hidden');
     connectMine(me.token); await refreshLibrary();
   } catch (error) { notify(error.message); }
@@ -666,14 +715,14 @@ $('#chat-send').onclick = sendChat; $('#chat-inp').addEventListener('keydown', e
 const keyOf = i => i.trackId || ('ext:' + ((i.title || '').trim() + '|' + (i.artist || '').trim()).toLowerCase());
 const isFav = i => shared.favorites.some(f => f.key === keyOf(i));
 function mini(text, title, onclick) { const b = document.createElement('button'); b.className = 'mini'; if (ICONS[text]) b.innerHTML = icon(text); else b.textContent = text; b.title = title; b.setAttribute('aria-label', title); b.onclick = onclick; return b; }
-function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = { favorites: r.favorites || [], playlists: r.playlists || [], notes: r.notes || [], roomName: r.roomName || '' }; renderShared(); renderLibrary(); renderPartnerCard(); } }); }
+function refreshShared() { if (!socket?.connected) return; socket.emit('shared:get', {}, r => { if (r?.ok) { shared = sharedFrom(r); renderShared(); renderLibrary(); renderPartnerCard(); } }); }
 function toggleFav(item) { socket.emit('fav:toggle', { item }, r => { if (!r?.ok) notify(r?.error || 'Could not update favorites.'); }); }
-function inviteToListen(item) {
+function inviteToListen(item, positionMs = 0) {
   socket.emit('track:invite', { item }, r => {
     if (!r?.ok) return notify(r?.error || 'Could not send.');
     const it = r.item || item;
     const t = it.trackId ? library.find(x => x.id === it.trackId) : (it.provider ? trackFromItem(it) : null);
-    if (t) selectTrack(t, true); else $('#upload-status').textContent = `Sent to ${partner?.name || 'your partner'}.`;
+    if (t) selectTrack(t, true, positionMs); else $('#upload-status').textContent = `Sent to ${partner?.name || 'your partner'}.`;
   });
 }
 let playlistPendingItem = null;
@@ -772,7 +821,7 @@ function searchLinks(item) {
   const q = encodeURIComponent(`${item.title} ${item.artist || ''}`.trim());
   return [['Spotify', `https://open.spotify.com/search/${q}`], ['YouTube Music', `https://music.youtube.com/search?q=${q}`]];
 }
-function itemRow(item, extra = []) {
+function itemRow(item, extra = [], opts = {}) {
   const row = document.createElement('div'); row.className = 'library-row';
   const thumb = document.createElement('div'); thumb.className = 'art'; thumb.style.cssText = artStyle({ id: item.trackId || item.key || item.title });
   const info = document.createElement('div'); info.className = 'track-info';
@@ -785,6 +834,7 @@ function itemRow(item, extra = []) {
     actions.append(mini('🎧', 'Listen together', () => listenTogether(item)));
     if (item.link) { const l = document.createElement('a'); l.href = item.link; l.target = '_blank'; l.rel = 'noopener noreferrer'; l.textContent = '↗'; l.className = 'mini'; actions.append(l); }
   }
+  if (!opts.noQueue && (item.trackId || item.provider)) actions.append(mini('＋ Next', 'Add to Up next', () => queueAdd(item)));
   actions.append(mini('send', 'Invite partner', () => inviteToListen(item)), ...extra);
   row.append(thumb, info, actions); return row;
 }
@@ -813,6 +863,8 @@ function syncRoomName() {
 function renderShared() {
   syncRoomName();
   renderRecent();
+  renderQueue();
+  renderUs();
   const fl = $('#fav-list'); fl.replaceChildren();
   if (!shared.favorites.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'Tap ♡ on a song to save it for both of you.'; fl.append(p); }
   shared.favorites.forEach(f => fl.append(itemRow(f, [mini('✕', 'Remove from favorites', () => toggleFav(f))])));
@@ -836,6 +888,36 @@ function renderShared() {
       mini('✕', 'Remove from playlist', () => socket.emit('playlist:remove', { id: p.id, key: i.key }))])));
     pl.append(d);
   });
+}
+// ---- Up next: a queue both partners edit; the session leader plays from it when a song ends ----
+function queueAdd(item) {
+  if (!socket?.connected) return notify('Connecting to SyncPair. Please try again in a moment.');
+  socket.emit('queue:add', { item }, r => notify(r?.ok ? 'Added to Up next.' : (r?.error || 'Could not add to Up next.')));
+}
+function takeNextQueued() {
+  return new Promise(resolve => {
+    if (!socket?.connected || !shared.queue?.length) return resolve(null);
+    const timer = setTimeout(() => resolve(null), 4000);
+    socket.emit('queue:shift', {}, r => { clearTimeout(timer); resolve(r?.ok ? r.item : null); });
+  });
+}
+async function playQueue() {
+  for (let item = await takeNextQueued(); item; item = await takeNextQueued()) {
+    if (!session) return inviteToListen(item); // opens a session with this song; the rest plays as songs end
+    const t = playableFromItem(item) || (item.provider ? trackFromItem(item) : null);
+    if (t) return selectTrack(t, true);
+  }
+  notify('Up next is empty.');
+}
+function renderQueue() {
+  const box = $('#queue-list'); if (!box) return; box.replaceChildren();
+  const q = shared.queue || [];
+  $('#queue-actions')?.classList.toggle('hidden', !q.length);
+  if (!q.length) { const p = document.createElement('p'); p.className = 'dim small'; p.textContent = 'Nothing queued yet. Tap ＋ Next on a song or link.'; box.append(p); return; }
+  q.forEach((i, n) => box.append(itemRow(i, [
+    ...(n > 0 ? [mini('▲', 'Move up', () => socket.emit('queue:move', { key: i.key, direction: -1 }))] : []),
+    ...(n < q.length - 1 ? [mini('▼', 'Move down', () => socket.emit('queue:move', { key: i.key, direction: 1 }))] : []),
+    mini('✕', 'Remove from Up next', () => socket.emit('queue:remove', { key: i.key }))], { noQueue: true })));
 }
 function renderSuggestBanner() {
   const b = $('#suggest-banner'); b.replaceChildren();
@@ -861,15 +943,20 @@ $('#btn-suggest').onclick = () => {
   ['#sug-title', '#sug-artist', '#sug-link'].forEach(s => { $(s).value = ''; });
 };
 
+$('#btn-play-queue').onclick = playQueue;
+$('#btn-clear-queue').onclick = () => socket?.emit('queue:clear', {});
 $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear your recently played list?')) socket.emit('recent:clear', {}); };
 (async function init() {
-  try {
-    const saved = JSON.parse(localStorage.getItem('syncpair-account') || 'null');
-    if (saved?.token) {
-      Object.assign(me, saved); $('#my-code').textContent = me.code;
-      $('#create-box').classList.add('hidden'); $('#pair-box').classList.remove('hidden'); connectMine(me.token);
-    }
-  } catch { localStorage.removeItem('syncpair-account'); }
+  try { navigator.storage?.persist?.(); } catch {} // ask the browser not to evict our storage (and the saved login with it)
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('syncpair-account') || 'null'); } catch { try { localStorage.removeItem('syncpair-account'); } catch {} }
+  if (!saved?.token) { // storage was cleared: the server-set cookie brings the account back
+    try { const r = await fetch('/api/session', { cache: 'no-store' }); if (r.ok) { const d = await r.json(); if (d?.token) saved = { id: d.userId, name: d.name, token: d.token, code: d.code, partnerId: d.partnerId || null }; } } catch {}
+  }
+  if (saved?.token) {
+    Object.assign(me, saved); saveAccount(); $('#my-code').textContent = me.code;
+    $('#create-box').classList.add('hidden'); $('#pair-box').classList.remove('hidden'); connectMine(me.token);
+  }
   try { await refreshLibrary(); } catch (error) { $('#upload-status').textContent = error.message; }
 })();
 
@@ -950,12 +1037,13 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
   const home = $('#screen-home'); if (!home) return;
   const top = el => el?.closest('#screen-home > *');
   const nowCard = $('.now-card'), partnerCard = $('#partner-card');
-  if (nowCard && partnerCard) partnerCard.after(nowCard); // the player is the hero: right under your partner
+  const usCard = $('#us-card');
+  if (nowCard && partnerCard) (usCard || partnerCard).after(nowCard); // the player is the hero: right under your partner
   const groups = {
-    home: [partnerCard, nowCard, top($('#recent-list'))],
+    home: [partnerCard, $('#us-card'), nowCard, $('#queue-card'), top($('#recent-list'))],
     library: [$('.library-card'), top($('#sug-title'))],
     lists: [top($('#fav-list')), top($('#playlist-list'))],
-    style: [$('.theme-panel')],
+    style: [$('.theme-panel'), $('#sync-card')],
   };
   Object.entries(groups).forEach(([tab, els]) => els.forEach(el => { if (el) el.dataset.tab = tab; }));
   const tabs = [['home', 'home', 'Home'], ['library', 'music', 'Library'], ['lists', 'heart', 'Playlists'], ['style', 'spark', 'Style']];
@@ -1050,3 +1138,83 @@ $('#btn-clear-recent').onclick = () => { if (recent.length && confirm('Clear you
 // Static transport icons (prev/next/play) — replaces emoji glyphs with consistent SVGs.
 document.querySelectorAll('[data-icon]').forEach(b => { b.innerHTML = icon(b.dataset.icon); });
 ['#me-play', '#s-play'].forEach(id => { $(id).innerHTML = icon('play'); });
+
+// Offline shell + faster starts (see sw.js). Live sync and uploads still need the server.
+if ('serviceWorker' in navigator && location.protocol !== 'file:') window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+
+// Headphone delay: Bluetooth adds 100-300 ms, so this phone plays slightly ahead of the partner's clock. Saved per device.
+(function initLatency() {
+  const range = $('#latency-control'), label = $('#latency-value'); if (!range) return;
+  const paint = () => { range.value = String(latencyMs); label.textContent = (latencyMs > 0 ? '+' : '') + latencyMs + ' ms'; };
+  range.addEventListener('input', () => { latencyMs = Number(range.value) || 0; try { localStorage.setItem('syncpair-latency', String(latencyMs)); } catch {} paint(); });
+  $('#latency-reset')?.addEventListener('click', () => { range.value = '0'; range.dispatchEvent(new Event('input')); });
+  paint();
+})();
+
+// ---- Long distance: partner's local time, status, countdown to the next visit, one-tap pings ----
+const PINGS = { think: ['💗', 'is thinking of you', 'Thinking of you'], miss: ['🥺', 'misses you', 'Miss you'], morning: ['☀️', 'says good morning', 'Good morning'], night: ['🌙', 'says good night', 'Good night'] };
+let myStatus = null;
+const myTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; } };
+function tzOffsetMin(tz, d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(d);
+  const g = t => Number(parts.find(p => p.type === t).value);
+  return Math.round((Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second')) - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+}
+const fmtHours = min => { const h = Math.abs(min) / 60; return Number.isInteger(h) ? String(h) : h.toFixed(1).replace(/\.0$/, ''); };
+function daysUntil(day) { // whole calendar days from today (local) to a YYYY-MM-DD date; negative if it has passed
+  const now = new Date(), start = new Date(now.getFullYear(), now.getMonth(), now.getDate()), [y, m, d] = day.split('-').map(Number);
+  return Math.round((new Date(y, m - 1, d) - start) / 86400000);
+}
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+function fillStatusInputs() {
+  const e = $('#status-emoji'), t = $('#status-text'); if (!e || !t) return;
+  if (document.activeElement !== t) t.value = myStatus?.text || '';
+  e.value = myStatus?.emoji || e.options[0]?.value || '';
+}
+function renderUs() {
+  const card = $('#us-card'); if (!card) return;
+  card.classList.toggle('hidden', !partner); if (!partner) return;
+  const timeBox = $('#us-time'), stBox = $('#us-status-partner'), cd = $('#us-countdown');
+  timeBox.textContent = '';
+  if (partner.tz) {
+    try {
+      const now = new Date();
+      const local = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', timeZone: partner.tz }).format(now);
+      const hour = Number(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: partner.tz }).format(now));
+      const diff = tzOffsetMin(partner.tz, now) - tzOffsetMin(myTz() || partner.tz, now), asleep = hour >= 23 || hour < 6;
+      timeBox.textContent = `${asleep ? '🌙' : '☀️'} ${partner.name}: ${local}` + (diff ? ` · ${fmtHours(diff)} h ${diff > 0 ? 'ahead of' : 'behind'} you` : ' · same time as you') + (asleep ? ' · probably asleep' : '');
+    } catch {}
+  } else timeBox.textContent = `${partner.name}'s local time shows up once they open the app.`;
+  const ps = partner.status; stBox.textContent = ps && (ps.text || ps.emoji) ? `${partner.name}: ${ps.emoji || ''} ${ps.text || ''}`.trim() : '';
+  stBox.classList.toggle('hidden', !stBox.textContent);
+  cd.replaceChildren();
+  const c = shared.countdown;
+  if (c?.date) {
+    const n = daysUntil(c.date), line = document.createElement('div'); line.className = 'us-count';
+    line.textContent = n > 0 ? `⏳ ${plural(n, 'day')} until ${c.label}` : n === 0 ? `🎉 Today: ${c.label}!` : `${c.label} was ${plural(-n, 'day')} ago. Set the next date below.`;
+    cd.append(line);
+  } else { const p = document.createElement('div'); p.className = 'dim small'; p.textContent = 'Set the date you will see each other next: a countdown makes the wait lighter.'; cd.append(p); }
+  if (shared.since) { const n = -daysUntil(shared.since); if (n >= 0) { const l = document.createElement('div'); l.className = 'dim small'; l.textContent = `💞 ${plural(n + 1, 'day')} together`; cd.append(l); } }
+  [['#cd-label', c?.label || ''], ['#cd-date', c?.date || ''], ['#since-date', shared.since || '']].forEach(([sel, v]) => { const el = $(sel); if (el && document.activeElement !== el) el.value = v; });
+  const box = $('#us-moments'); box.replaceChildren();
+  [...(shared.pings || [])].slice(-4).reverse().forEach(p => {
+    const d = new Date(p.at), same = d.toDateString() === new Date().toDateString();
+    const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), when = same ? t : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${t}`;
+    const row = document.createElement('div'); row.textContent = `${p.from === me.id ? 'You' : p.fromName} · ${(PINGS[p.kind] || ['💗'])[0]} ${(PINGS[p.kind] || [, , 'Thinking of you'])[2]} · ${when}`; box.append(row);
+  });
+}
+function sendPing(kind) {
+  if (!socket?.connected) return notify('Connecting to SyncPair. Please try again in a moment.');
+  try { navigator.vibrate?.(20); } catch {}
+  socket.emit('ping:send', { kind }, r => notify(r?.ok ? `${PINGS[kind][0]} Sent${r.delivered ? '' : ': they will see it when they are back'}.` : (r?.error || 'Could not send.')));
+}
+(function initUs() {
+  const bar = $('#us-pings'); if (!bar) return;
+  Object.entries(PINGS).forEach(([kind, [emoji, , label]]) => { const b = document.createElement('button'); b.className = 'ping-btn'; b.dataset.kind = kind; b.textContent = `${emoji} ${label}`; b.onclick = () => sendPing(kind); bar.append(b); });
+  $('#btn-save-status').onclick = () => socket?.emit('profile:set', { status: { emoji: $('#status-emoji').value, text: $('#status-text').value } }, r => { if (r?.ok) { myStatus = r.status; notify('Status shared.'); } else notify(r?.error || 'Could not save.'); });
+  $('#btn-save-us').onclick = () => {
+    const date = $('#cd-date').value;
+    socket?.emit('us:set', { countdown: date ? { date, label: $('#cd-label').value } : null, since: $('#since-date').value }, r => notify(r?.ok ? 'Saved for both of you.' : (r?.error || 'Could not save.')));
+  };
+  setInterval(renderUs, 30000);
+})();

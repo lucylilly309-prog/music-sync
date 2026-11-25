@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="SyncPair"/>
-  <link rel="stylesheet" href="style.css?v=23"/>
+  <link rel="stylesheet" href="style.css?v=28"/>
 </head>
 <body>
 <main>
@@ -53,7 +53,22 @@
       <label for="room-name">Room name</label><input id="room-name" placeholder="e.g. our little universe" maxlength="40"/>
       <p class="dim small">Your partner sees this name too.</p>
     </section>
+    <section id="sync-card" class="card"><h3>🎧 Sync tuning</h3><p class="dim small">Bluetooth headphones add 100–300 ms of delay. If you hear your partner's music slightly behind yours, move this up so this phone plays ahead. Saved on this device only.</p><label for="latency-control">Headphone delay <b id="latency-value">0 ms</b></label><input id="latency-control" type="range" min="-500" max="1500" step="25" value="0" aria-label="Headphone delay compensation in milliseconds"/><button id="latency-reset" class="mini">Reset</button></section>
     <div id="partner-card" class="card"><p class="dim">Waiting for your partner…</p></div>
+    <section id="us-card" class="card hidden">
+      <h3>🌍 Us, across the distance</h3>
+      <p id="us-time" class="us-line"></p><p id="us-status-partner" class="us-line hidden"></p>
+      <div id="us-countdown" class="us-line"></div>
+      <div id="us-pings" class="us-pings"></div>
+      <div id="us-moments" class="dim small"></div>
+      <details><summary>My status &amp; our dates</summary>
+        <div class="row"><select id="status-emoji" aria-label="Status emoji"><option>😊</option><option>😴</option><option>💪</option><option>📚</option><option>🚌</option><option>🍜</option><option>😢</option><option>💗</option></select><input id="status-text" placeholder="What are you up to?" maxlength="60"/></div>
+        <button id="btn-save-status" class="mini">Share my status</button>
+        <label for="cd-label">Next time we meet</label><input id="cd-label" placeholder="e.g. Tunis airport ✈️" maxlength="50"/><input id="cd-date" type="date" aria-label="Date of the next visit"/>
+        <label for="since-date">Together since</label><input id="since-date" type="date"/>
+        <button id="btn-save-us" class="mini">Save for both of us</button>
+      </details>
+    </section>
     <section class="card library-card">
       <div class="row between"><div><h3>Your shared library</h3><p class="dim small">Upload audio you have the right to share. Both phones use this library.</p></div><span id="track-count" class="pill">0 tracks</span></div>
       <label class="file-label" for="audio-file">＋ Add music files</label>
@@ -72,6 +87,7 @@
       <button id="btn-suggest" class="primary">Send to partner</button>
     </section>
     <div id="suggest-banner" class="card hidden"></div>
+    <section id="queue-card" class="card"><div class="row between"><h3>⏭ Up next</h3><div id="queue-actions" class="row hidden"><button id="btn-play-queue" class="mini">▶ Play together</button><button id="btn-clear-queue" class="mini">Clear</button></div></div><p class="dim small">Songs you both line up. In a listening session they play in order.</p><div id="queue-list" class="library-list"></div></section>
     <section class="card"><div class="row between"><h3>🕘 Recently played</h3><button id="btn-clear-recent" class="mini" aria-label="Clear recently played">Clear</button></div><div id="recent-list" class="library-list"></div></section>
     <section class="card"><h3>♥ Favorites together</h3><div id="fav-list" class="library-list"></div></section>
     <section class="card"><div class="row between"><h3>Playlists</h3><button id="btn-new-playlist">＋ New</button></div><div id="playlist-list" class="library-list"></div></section>
@@ -122,6 +138,6 @@
 </main>
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <audio id="audio-player" preload="metadata"></audio>
-<script src="/socket.io/socket.io.js"></script><script src="app.js?v=23"></script>
+<script src="/socket.io/socket.io.js"></script><script src="app.js?v=28"></script>
 </body>
 </html>
