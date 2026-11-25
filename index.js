@@ -271,6 +271,62 @@ function cleanItem(i, uid) {
 }
 function activeSessionOf(uid) { return [...sessions.values()].find(s => s.active && (s.a === uid || s.b === uid)) || null; }
 
+// ---- Notifications, widget data, one-tap pings over REST ----
+const push = require('./push')({ users, saveData, dataDir: DATA_DIR });
+const PING_TEXT = { think: ['💗', 'is thinking of you'], miss: ['🥺', 'misses you'], morning: ['☀️', 'says good morning'], night: ['🌙', 'says good night'] };
+function sendPing(me, kind) {
+  const pr = pairOf(me.id); if (!pr) return { ok: false, error: 'Pair with someone first.' };
+  kind = String(kind || ''); if (!PING_TEXT[kind]) return { ok: false, error: 'Unknown message.' };
+  const ping = { from: me.id, fromName: me.name, kind, at: Date.now() };
+  pr.data.pings = [...(pr.data.pings || []), ping].slice(-30);
+  saveData(); pushSharedFor(me.id);
+  io.to('user:' + pr.partner.id).emit('ping:received', ping);
+  const [emoji, text] = PING_TEXT[kind];
+  push.notify(pr.partner, { title: `${me.name} ${emoji}`, body: text[0].toUpperCase() + text.slice(1), tag: 'ping' }).catch(() => {});
+  return { ok: true, delivered: !!pr.partner.online };
+}
+app.post('/api/ping', rateLimit(30, 60_000), requireAuth, (req, res) => { const r = sendPing(req.user, req.body?.kind); res.status(r.ok ? 200 : 400).json(r); });
+app.get('/api/push/key', async (_req, res) => { await push.ready; res.json({ publicKey: push.publicKey(), fcm: push.fcmEnabled }); });
+app.post('/api/push/subscribe', rateLimit(30, 60 * 60 * 1000), requireAuth, (req, res) => { const r = push.addWebSub(req.user, req.body?.subscription); res.status(r.ok ? 200 : 400).json(r); });
+app.post('/api/push/fcm', rateLimit(30, 60 * 60 * 1000), requireAuth, (req, res) => { const r = push.addFcmToken(req.user, req.body?.token); res.status(r.ok ? 200 : 400).json(r); });
+app.post('/api/push/unsubscribe', rateLimit(30, 60 * 60 * 1000), requireAuth, (req, res) => { push.remove(req.user, { endpoint: String(req.body?.endpoint || ''), all: !!req.body?.all }); res.json({ ok: true }); });
+// Compact snapshot for the Android home-screen widget (the widget polls it with the account token).
+app.get('/api/widget', rateLimit(240, 60 * 60 * 1000), requireAuth, (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const me = req.user, partner = partnerOf(me.id); if (!partner) return res.json({ paired: false });
+  const pr = pairOf(me.id), st = states.get(partner.id), last = (pr.data.pings || []).slice(-1)[0] || null;
+  const live = st?.track && partner.online && Date.now() - st.serverTime < 60_000 ? st : null;
+  res.json({
+    paired: true, name: partner.name, online: !!partner.online, tz: partner.tz || '', status: partner.status || null,
+    nowPlaying: live ? { title: live.track.title || '', artist: live.track.artist || '', isPlaying: !!live.isPlaying } : null,
+    countdown: pr.data.countdown || null, since: pr.data.since || '',
+    lastPing: last ? { kind: last.kind, fromName: last.fromName, mine: last.from === me.id, at: last.at } : null, serverTime: Date.now()
+  });
+});
+// "Today / tomorrow" reminders for the shared countdown, sent at REMINDER_HOUR (default 8:00) in each person's own time zone.
+const REMINDER_HOUR = process.env.REMINDER_HOUR === undefined ? 8 : Number(process.env.REMINDER_HOUR);
+function localDayHour(tz, ms) {
+  try {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms)).map(x => [x.type, x.value]));
+    return { day: `${p.year}-${p.month}-${p.day}`, hour: Number(p.hour) };
+  } catch { return localDayHour('UTC', ms); }
+}
+function runCountdownReminders(now = Date.now()) {
+  for (const [key, data] of pairs) {
+    const c = data.countdown; if (!c?.date) continue;
+    const [a, b] = key.split(':');
+    for (const [uid, other] of [[a, b], [b, a]]) {
+      const u = users.get(uid); if (!u || u.partnerId !== other) continue;
+      const { day, hour } = localDayHour(u.tz, now); if (hour < REMINDER_HOUR) continue;
+      const kind = c.date === day ? 'today' : c.date === localDayHour(u.tz, now + 86_400_000).day ? 'tomorrow' : null; if (!kind) continue;
+      const mark = `${c.date}:${kind}`; data.reminded = data.reminded || {}; if (data.reminded[uid] === mark) continue;
+      data.reminded[uid] = mark; saveData();
+      push.notify(u, kind === 'today' ? { title: `🎉 Today: ${c.label}`, body: 'The wait is over.', tag: 'countdown' } : { title: `⏳ Tomorrow: ${c.label}`, body: 'One more sleep.', tag: 'countdown' }).catch(() => {});
+    }
+  }
+}
+setInterval(runCountdownReminders, Number(process.env.REMINDER_INTERVAL_MS) || 3_600_000).unref();
+
 // ---- Staying signed in ----
 // The token lives in the browser's localStorage AND in an HttpOnly cookie, so clearing one does not log anyone out.
 // If the server itself forgot the account (data reset), /api/restore re-creates it from what the phone still holds.
@@ -364,6 +420,7 @@ io.on('connection', socket => {
     sessions.set(sess.id, sess);
     socket.join('session:' + sess.id);
     io.to('user:' + partner.id).emit('session:invite', { session: sess, from: publicUser(me), item: openSession.item || null });
+    push.notify(partner, { title: `${me.name} wants to listen together 🎧`, body: openSession.item?.title ? `Join them: ${openSession.item.title}` : 'Tap to join.', tag: 'invite' }).catch(() => {});
     socket.emit('session:started', { session: sess });
     return sess;
   }
@@ -390,6 +447,7 @@ io.on('connection', socket => {
     };
     pr.data.notes.push(note);
     pushShared(pr);
+    push.notify(pr.partner, { title: `${me.name} left you a note 💌`, body: 'Open SyncPair to read it.', tag: 'note' }).catch(() => {});
     ack({ ok: true, note });
   });
   limited('note:delete', 20, 60_000, (payload = {}, ack = () => {}) => {
@@ -495,16 +553,7 @@ io.on('connection', socket => {
     }
     pushShared(pr); ack({ ok: true });
   });
-  const PING_KINDS = ['think', 'miss', 'morning', 'night'];
-  limited('ping:send', 20, 60_000, (p = {}, ack = () => {}) => {
-    const pr = pairOf(me.id); if (!pr) return ack(NEED_PAIR);
-    const kind = String(p.kind || ''); if (!PING_KINDS.includes(kind)) return ack({ ok: false, error: 'Unknown message.' });
-    const ping = { from: me.id, fromName: me.name, kind, at: Date.now() };
-    pr.data.pings = [...(pr.data.pings || []), ping].slice(-30);
-    pushShared(pr);
-    io.to('user:' + pr.partner.id).emit('ping:received', ping);
-    ack({ ok: true, delivered: !!pr.partner.online });
-  });
+  limited('ping:send', 20, 60_000, (p = {}, ack = () => {}) => ack(sendPing(me, p.kind)));
   // Shared "Up next" queue. Either partner can add, reorder or remove; during a session the leader takes the head
   // when a song ends (queue:shift removes it atomically, so both phones never consume the same entry twice).
   limited('queue:add', 30, 60_000, (p = {}, ack = () => {}) => {
@@ -546,6 +595,7 @@ io.on('connection', socket => {
       return ack({ ok: true, session: true, item });
     }
     io.to('user:' + pr.partner.id).emit('track:suggest', { from: me.name, item });
+    push.notify(pr.partner, { title: `${me.name} suggested a song 🎵`, body: item.title, tag: 'suggest' }).catch(() => {});
     ack({ ok: true, session: false, item });
   });
 

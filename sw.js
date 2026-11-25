@@ -1,6 +1,6 @@
 /* SyncPair service worker: network-first for the app shell, with the last good copy as an offline fallback.
    It never touches /api, /music, /health or the Socket.IO transport, so sync and audio behave exactly as before. */
-const VERSION = 'syncpair-v28';
+const VERSION = 'syncpair-v29';
 const SHELL = ['/', '/app.js', '/style.css', '/embed.html', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png', '/socket.io/socket.io.js'];
 const SHELL_SET = new Set(SHELL);
 
@@ -33,4 +33,21 @@ self.addEventListener('fetch', event => {
       })
       .catch(() => caches.match(url.pathname).then(hit => hit || Response.error()))
   );
+});
+
+// ---- Notifications (Web Push) ----
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data ? event.data.text() : '' }; }
+  event.waitUntil(self.registration.showNotification(data.title || 'SyncPair', {
+    body: data.body || '', tag: data.tag || 'syncpair', renotify: true, icon: '/icon-192.png', badge: '/icon-192.png', data: { url: data.url || '/' }
+  }));
+});
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    for (const c of list) if ('focus' in c) return c.focus();
+    return self.clients.openWindow(url);
+  }));
 });

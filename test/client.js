@@ -81,6 +81,27 @@ w.eval(fs.readFileSync(root + 'app.js', 'utf8') + '\n;window.__t = { get noteDra
   w.document.querySelector('#status-text').value = 'on the bus'; emitted = []; w.document.querySelector('#btn-save-status').click();
   assert.strictEqual(emitted[0][0], 'profile:set'); assert.strictEqual(emitted[0][1].status.text, 'on the bus');
   // stale token -> back to sign-up with a message
+  // notifications: explained when unsupported, and the subscribe/unsubscribe flow when push APIs exist
+  const sleep30 = () => new Promise(r => setTimeout(r, 30));
+  assert.ok(w.document.querySelector('#btn-push').classList.contains('hidden') && /push support/.test(w.document.querySelector('#push-status').textContent), 'explains when push is unsupported');
+  const posted = []; let existing = null;
+  const subObj = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'pk', auth: 'ak' } }; }, unsubscribe: async () => true };
+  Object.defineProperty(w.navigator, 'serviceWorker', { configurable: true, value: { ready: Promise.resolve({ pushManager: { getSubscription: async () => existing, subscribe: async () => (existing = subObj) } }) } });
+  w.PushManager = function PushManager() {}; w.Notification = { permission: 'default', requestPermission: async () => (w.Notification.permission = 'granted') };
+  w.fetch = async (url, opts) => { if (url === '/api/push/key') return { ok: true, json: async () => ({ publicKey: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', fcm: false }) }; posted.push([url, opts && JSON.parse(opts.body)]); return { ok: true, json: async () => [] }; };
+  w.eval('renderPushUi()');
+  const pbtn = w.document.querySelector('#btn-push'); assert.ok(!pbtn.classList.contains('hidden'), 'button shown when push is supported');
+  pbtn.click(); await sleep30();
+  assert.ok(posted.some(([u, b]) => u === '/api/push/subscribe' && b.subscription.endpoint.includes('fcm.googleapis.com')), 'subscription is sent to the server');
+  assert.strictEqual(w.localStorage.getItem('syncpair-push'), '1'); assert.ok(/Turn off/.test(pbtn.textContent));
+  pbtn.click(); await sleep30();
+  assert.ok(posted.some(([u]) => u === '/api/push/unsubscribe'), 'turning off tells the server'); assert.strictEqual(w.localStorage.getItem('syncpair-push'), null);
+  // widget bridge: configured on connect, refreshed on demand, cleared on sign-out
+  const wcalls = [];
+  w.Capacitor = { Plugins: { SyncPairWidget: { configure: async o => { wcalls.push(['configure', o]); }, refresh: async () => { wcalls.push(['refresh']); }, clear: async () => { wcalls.push(['clear']); } } } };
+  handlers['connect'](); w.eval('widgetRefresh(true)'); await sleep30();
+  assert.ok(wcalls.some(c => c[0] === 'configure' && c[1].token === 'tok' && c[1].baseUrl === 'http://localhost:3000'), 'widget receives the server and token');
+  assert.ok(wcalls.some(c => c[0] === 'refresh'), 'widget refresh requested');
   assert.strictEqual(JSON.parse(w.localStorage.getItem('syncpair-account')).partnerId, 'p', 'partner id saved for restores');
   // server forgot the account: restore it silently instead of logging out
   const restoreCalls = []; let restoreReply = { ok: true, body: { userId: 'u1', name: 'Me', code: 'ZZZ999', partnerId: 'p', restored: true } };
@@ -98,6 +119,7 @@ w.eval(fs.readFileSync(root + 'app.js', 'utf8') + '\n;window.__t = { get noteDra
   assert.ok(!w.document.querySelector('#screen-pair').classList.contains('hidden'), 'pair screen visible');
   assert.ok(!w.document.querySelector('#create-box').classList.contains('hidden'), 'sign-up shown');
   assert.ok(/not found/i.test(w.document.querySelector('#pair-status').textContent), 'explanation shown');
+  assert.ok(wcalls.some(c => c[0] === 'clear'), 'widget cleared on sign-out');
   // toast
   w.eval("notify('hello')"); assert.strictEqual(w.document.querySelector('#toast').textContent, 'hello');
   assert.ok(!w.document.querySelector('#toast').classList.contains('hidden'));

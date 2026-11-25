@@ -221,7 +221,7 @@ async function createAccount(name) {
 function connectMine(token) {
   socket = io({ auth: { token } });
   socket.on('disconnect', () => { wasDown = true; if (session) $('#session-status').textContent = 'Connection lost. Reconnecting…'; notify('Connection lost. Reconnecting…'); });
-  socket.on('connect', () => { restoreTries = 0; if (wasDown) { wasDown = false; notify('Back online.'); refreshLibrary().catch(() => {}); } refreshShared(); socket.emit('profile:set', { tz: myTz() }, r => { if (r?.ok) { myStatus = r.status; fillStatusInputs(); renderUs(); } }); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
+  socket.on('connect', () => { restoreTries = 0; widgetConfigure(); resyncPush(); if (wasDown) { wasDown = false; notify('Back online.'); refreshLibrary().catch(() => {}); } refreshShared(); socket.emit('profile:set', { tz: myTz() }, r => { if (r?.ok) { myStatus = r.status; fillStatusInputs(); renderUs(); } }); socket.emit('recent:get', {}, r => { if (r?.ok) { recent = r.recent; renderRecent(); } }); });
   socket.on('library:changed', () => refreshLibrary().catch(() => {}));
   socket.on('recent:update', r => { recent = r.recent || []; renderRecent(); });
   socket.on('shared:update', st => { shared = sharedFrom(st); renderShared(); renderLibrary(); renderPartnerCard(); });
@@ -236,7 +236,7 @@ function connectMine(token) {
   socket.on('partner:info', p => { partner = p; partnerOnline = !!p.online; if (me.partnerId !== p.id) { me.partnerId = p.id; saveAccount(); } renderHome(); refreshShared(); });
   socket.on('partner:presence', ({ online }) => { partnerOnline = !!online; renderPresence(); renderPartnerCard(); });
   socket.on('partner:state', st => { partnerState = st; renderPartnerNow(); });
-  socket.on('partner:profile', p => { if (partner) { partner.tz = p?.tz || ''; partner.status = p?.status || null; renderUs(); } });
+  socket.on('partner:profile', p => { if (partner) { partner.tz = p?.tz || ''; partner.status = p?.status || null; renderUs(); widgetRefresh(); } });
   socket.on('ping:received', p => { const [e, label] = PINGS[p?.kind] || ['💗', 'is thinking of you']; notify(`${p?.fromName || 'Your partner'} ${e} ${label}`); try { navigator.vibrate?.([80, 60, 80]); } catch {} if (session) floatEmoji(e); });
   socket.on('session:invite', ({ session: incoming, from, item }) => { pendingInvite = incoming; pendingItem = item || null; refreshLibrary().catch(() => {}); renderInviteBanner(from); });
   socket.on('session:started', ({ session: started }) => { session = started; pendingInvite = null; pendingItem = null; enterSession(); renderPartnerNow(); });
@@ -268,6 +268,7 @@ async function restoreAccount() {
 }
 function resetAccount(message) {
   try { localStorage.removeItem('syncpair-account'); } catch {}
+  try { widgetPlugin()?.clear()?.catch?.(() => {}); } catch {}
   socket?.close(); socket = null;
   Object.assign(me, { id: null, name: '', token: null, code: null });
   partner = null; partnerState = null; partnerOnline = false; session = null; pendingInvite = null; library = []; noteDraft = '';
@@ -861,6 +862,7 @@ function syncRoomName() {
   if (title) title.textContent = name;
 }
 function renderShared() {
+  widgetRefresh();
   syncRoomName();
   renderRecent();
   renderQueue();
@@ -1218,3 +1220,72 @@ function sendPing(kind) {
   };
   setInterval(renderUs, 30000);
 })();
+
+// ---- Notifications: Web Push in browsers/PWA, FCM inside the Android app ----
+const nativePush = () => (window.Capacitor?.getPlatform?.() === 'android' ? window.Capacitor?.Plugins?.PushNotifications : null); // iOS has no FCM path here
+const webPushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const b64uToBytes = s => { const raw = atob((s + '='.repeat((4 - (s.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(raw, c => c.charCodeAt(0)); };
+const bytesToB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const authedPost = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + me.token }, body: JSON.stringify(body) });
+async function pushKeys() { const r = await fetch('/api/push/key'); if (!r.ok) throw new Error('Notifications are unavailable on this server.'); return r.json(); }
+async function syncWebPush(create) { // create = true only from the button (it may ask for permission)
+  const { publicKey } = await pushKeys(); if (!publicKey) throw new Error('Notifications are unavailable on this server.');
+  const reg = await navigator.serviceWorker.ready; let sub = await reg.pushManager.getSubscription();
+  if (sub?.options?.applicationServerKey && bytesToB64u(sub.options.applicationServerKey) !== publicKey) { await sub.unsubscribe(); sub = null; } // server keys changed
+  if (!sub) { if (!create) return false; sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) }); }
+  const r = await authedPost('/api/push/subscribe', { subscription: sub.toJSON() }); if (!r.ok) throw new Error('Could not turn on notifications.');
+  return true;
+}
+let nativeBound = false;
+async function syncNativePush(PN, create) {
+  const { fcm } = await pushKeys(); if (!fcm) throw new Error('Notifications are not set up on this server yet.');
+  if (!nativeBound) {
+    nativeBound = true;
+    PN.addListener('registration', t => authedPost('/api/push/fcm', { token: t.value }).catch(() => {}));
+    PN.addListener('registrationError', () => notify('Could not register for notifications.'));
+    PN.addListener('pushNotificationReceived', n => notify([n.title, n.body].filter(Boolean).join(': ')));
+  }
+  let perm = await PN.checkPermissions();
+  if (perm.receive !== 'granted') { if (!create) return false; perm = await PN.requestPermissions(); if (perm.receive !== 'granted') throw new Error('Notifications are blocked. Allow them in the system settings.'); }
+  await PN.register(); return true;
+}
+async function resyncPush() { // after every (re)connect: the token or subscription may have changed, or the server forgot it
+  try {
+    if (localStorage.getItem('syncpair-push') !== '1') return;
+    const PN = nativePush();
+    if (PN) await syncNativePush(PN, false); else if (webPushSupported() && Notification.permission === 'granted') await syncWebPush(false);
+  } catch {}
+}
+function renderPushUi() {
+  const btn = $('#btn-push'), st = $('#push-status'); if (!btn) return;
+  const native = !!nativePush();
+  if (!native && !webPushSupported()) { btn.classList.add('hidden'); st.textContent = 'Notifications need a browser with push support. On iPhone, add SyncPair to the Home Screen first.'; return; }
+  const on = localStorage.getItem('syncpair-push') === '1' && (native || Notification.permission === 'granted');
+  btn.classList.remove('hidden'); btn.textContent = on ? 'Turn off notifications' : '🔔 Turn on notifications';
+  st.textContent = !native && Notification.permission === 'denied' ? 'Notifications are blocked for this site. Allow them in your browser settings.'
+    : on ? 'On. You get pings, invites, notes and countdown reminders while the app is closed.' : 'Get pings, invites, notes and countdown reminders while the app is closed.';
+}
+async function togglePush() {
+  const PN = nativePush();
+  try {
+    if (localStorage.getItem('syncpair-push') === '1') {
+      if (PN) { try { PN.unregister?.(); } catch {} try { await authedPost('/api/push/unsubscribe', { all: true }); } catch {} }
+      else { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) { try { await authedPost('/api/push/unsubscribe', { endpoint: sub.endpoint }); } catch {} await sub.unsubscribe(); } }
+      localStorage.removeItem('syncpair-push'); notify('Notifications off.');
+    } else {
+      if (PN) await syncNativePush(PN, true);
+      else { if (Notification.permission === 'default') await Notification.requestPermission(); if (Notification.permission !== 'granted') throw new Error('Notifications are blocked. Allow them in your browser settings.'); await syncWebPush(true); }
+      localStorage.setItem('syncpair-push', '1'); notify('Notifications on.');
+    }
+  } catch (e) { notify(e.message || 'Could not change notifications.'); }
+  renderPushUi();
+}
+$('#btn-push')?.addEventListener('click', togglePush);
+renderPushUi();
+
+// ---- Android home-screen widget (native plugin; harmless no-op in browsers) ----
+const widgetPlugin = () => window.Capacitor?.Plugins?.SyncPairWidget;
+let lastWidgetPoke = 0;
+function widgetConfigure() { try { if (me.token) widgetPlugin()?.configure({ baseUrl: location.origin, token: me.token })?.catch?.(() => {}); } catch {} }
+function widgetRefresh(force) { const now = Date.now(); if (!force && now - lastWidgetPoke < 20000) return; lastWidgetPoke = now; try { widgetPlugin()?.refresh()?.catch?.(() => {}); } catch {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') widgetRefresh(true); }); // leaving the app = looking at the home screen

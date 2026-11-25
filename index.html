@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="SyncPair"/>
-  <link rel="stylesheet" href="style.css?v=28"/>
+  <link rel="stylesheet" href="style.css?v=29"/>
 </head>
 <body>
 <main>
@@ -53,7 +53,7 @@
       <label for="room-name">Room name</label><input id="room-name" placeholder="e.g. our little universe" maxlength="40"/>
       <p class="dim small">Your partner sees this name too.</p>
     </section>
-    <section id="sync-card" class="card"><h3>🎧 Sync tuning</h3><p class="dim small">Bluetooth headphones add 100–300 ms of delay. If you hear your partner's music slightly behind yours, move this up so this phone plays ahead. Saved on this device only.</p><label for="latency-control">Headphone delay <b id="latency-value">0 ms</b></label><input id="latency-control" type="range" min="-500" max="1500" step="25" value="0" aria-label="Headphone delay compensation in milliseconds"/><button id="latency-reset" class="mini">Reset</button></section>
+    <section id="sync-card" class="card"><h3>🔔 Notifications</h3><p id="push-status" class="dim small"></p><button id="btn-push" class="mini">🔔 Turn on notifications</button><h3>🎧 Sync tuning</h3><p class="dim small">Bluetooth headphones add 100–300 ms of delay. If you hear your partner's music slightly behind yours, move this up so this phone plays ahead. Saved on this device only.</p><label for="latency-control">Headphone delay <b id="latency-value">0 ms</b></label><input id="latency-control" type="range" min="-500" max="1500" step="25" value="0" aria-label="Headphone delay compensation in milliseconds"/><button id="latency-reset" class="mini">Reset</button></section>
     <div id="partner-card" class="card"><p class="dim">Waiting for your partner…</p></div>
     <section id="us-card" class="card hidden">
       <h3>🌍 Us, across the distance</h3>
@@ -138,6 +138,6 @@
 </main>
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 <audio id="audio-player" preload="metadata"></audio>
-<script src="/socket.io/socket.io.js"></script><script src="app.js?v=28"></script>
+<script src="/socket.io/socket.io.js"></script><script src="app.js?v=29"></script>
 </body>
 </html>

@@ -2,12 +2,14 @@
 const { spawn } = require('child_process');
 const fs = require('fs'), os = require('os'), path = require('path'), assert = require('assert');
 const { io } = require('socket.io-client');
+const crypto = require('crypto');
+let SERVER_ENV = {}; // extra env for the server under test (mock push services), set before it starts
 
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'syncpair-test-'));
 const PORT = 3100 + Math.floor(Math.random() * 500), BASE = `http://127.0.0.1:${PORT}`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const startServer = () => new Promise((resolve, reject) => {
-  const child = spawn('node', [path.join(__dirname, '..', 'index.js')], { env: { ...process.env, PORT, DATA_DIR }, stdio: ['ignore', 'pipe', 'inherit'] });
+  const child = spawn('node', [path.join(__dirname, '..', 'index.js')], { env: { ...process.env, PORT, DATA_DIR, ...SERVER_ENV }, stdio: ['ignore', 'pipe', 'inherit'] });
   child.stdout.on('data', d => { if (String(d).includes('listening')) resolve(child); });
   child.on('error', reject);
 });
@@ -18,6 +20,30 @@ const once = (s, event) => new Promise(r => s.once(event, r));
 const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })).json();
 
 (async () => {
+  // Mock push services: an HTTPS "browser push service" and an FCM + OAuth endpoint (plain HTTP via FCM_SEND_BASE).
+  const hits = { web: [], fcm: [], fcmAuth: [] };
+  const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-cert-'));
+  require('child_process').execSync(`openssl req -x509 -newkey rsa:2048 -nodes -keyout ${certDir}/k.pem -out ${certDir}/c.pem -days 1 -subj /CN=localhost`, { stdio: 'ignore' });
+  const webMock = require('https').createServer({ key: fs.readFileSync(certDir + '/k.pem'), cert: fs.readFileSync(certDir + '/c.pem') }, (req, res) => {
+    hits.web.push({ url: req.url, auth: req.headers.authorization, enc: req.headers['content-encoding'] }); req.resume(); res.statusCode = 201; res.end();
+  });
+  const fcmMock = require('http').createServer((req, res) => {
+    let body = ''; req.on('data', d => { body += d; });
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/token') { hits.fcmAuth.push(body); return res.end(JSON.stringify({ access_token: 'at', expires_in: 3600 })); }
+      const msg = JSON.parse(body).message; hits.fcm.push({ url: req.url, auth: req.headers.authorization, msg });
+      if (msg.token === 'dead-token') { res.statusCode = 404; return res.end(JSON.stringify({ error: { status: 'NOT_FOUND', message: 'Requested entity was not found.' } })); }
+      res.end('{"name":"m"}');
+    });
+  });
+  await Promise.all([new Promise(r => webMock.listen(0, '127.0.0.1', r)), new Promise(r => fcmMock.listen(0, '127.0.0.1', r))]);
+  const webPort = webMock.address().port, fcmPort = fcmMock.address().port;
+  const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  SERVER_ENV = {
+    NODE_TLS_REJECT_UNAUTHORIZED: '0', PUSH_ALLOWED_HOSTS: '127.0.0.1', FCM_SEND_BASE: `http://127.0.0.1:${fcmPort}`, REMINDER_INTERVAL_MS: '300', REMINDER_HOUR: '0',
+    FIREBASE_SERVICE_ACCOUNT: JSON.stringify({ client_email: 'sp@test-proj.iam.gserviceaccount.com', private_key: privateKey, project_id: 'test-proj', token_uri: `http://127.0.0.1:${fcmPort}/token` })
+  };
   let server = await startServer();
   try {
     const A = await newUser('alice'), B = await newUser('bob');
@@ -95,7 +121,6 @@ const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST'
     assert.strictEqual((await call(sb, 'shared:get', {})).pings.length, 1, 'pings are kept as moments');
 
     // staying signed in: cookie backup, and automatic restore after the server forgot the accounts
-    const crypto = require('crypto');
     const reg = await fetch(BASE + '/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'cookie' }) });
     const setCookie = reg.headers.get('set-cookie'), regBody = await reg.json();
     assert.match(setCookie, /sp_session=[0-9a-f]{64}/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /Max-Age=31536000/);
@@ -119,6 +144,55 @@ const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST'
     assert.ok(Array.isArray((await call(sRa, 'shared:get', {})).favorites));
     assert.strictEqual((await post('/api/restore', { ...rC, name: 'Rc', partnerId: rA.userId })).body.partnerId, null, 'a one-sided claim never pairs');
     sRa.close(); sRb.close();
+
+    // notifications: Web Push + FCM go only to people who do not have the app open
+    const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await sleep(50); } return false; };
+    const P = await newUser('pat'), Q = await newUser('quinn');
+    const sp = await connect(P.token); let sq = await connect(Q.token);
+    assert.ok((await call(sq, 'pair:accept', { code: P.code })).ok);
+    const pushKey = await (await fetch(BASE + '/api/push/key')).json();
+    assert.ok(pushKey.publicKey.length > 40 && pushKey.fcm === true, 'server exposes its VAPID key and FCM status');
+    const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+    const sub = { endpoint: `https://127.0.0.1:${webPort}/push/q1`, keys: { p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+    assert.strictEqual((await api(Q.token, 'POST', '/api/push/subscribe', { subscription: sub })).status, 200);
+    assert.strictEqual((await api(Q.token, 'POST', '/api/push/subscribe', { subscription: { ...sub, endpoint: 'https://evil.example.com/x' } })).status, 400, 'only real push services are accepted');
+    assert.strictEqual((await api('nope', 'POST', '/api/push/subscribe', { subscription: sub })).status, 401, 'subscribing needs an account');
+    assert.strictEqual((await api(Q.token, 'POST', '/api/push/fcm', { token: 'good-token' })).status, 200);
+    assert.strictEqual((await api(Q.token, 'POST', '/api/push/fcm', { token: 'dead-token' })).status, 200);
+    assert.ok((await call(sp, 'ping:send', { kind: 'think' })).ok); await sleep(400);
+    assert.strictEqual(hits.web.length + hits.fcm.length, 0, 'no push while the app is open');
+    sq.close(); await sleep(200);
+    assert.ok((await call(sp, 'ping:send', { kind: 'miss' })).ok);
+    assert.ok(await waitFor(() => hits.web.length >= 1 && hits.fcm.length >= 2), 'a ping reaches both Web Push and FCM');
+    assert.match(hits.web[0].auth, /^vapid /i); assert.strictEqual(hits.web[0].enc, 'aes128gcm');
+    const good = hits.fcm.find(h => h.msg.token === 'good-token');
+    assert.strictEqual(good.url, '/v1/projects/test-proj/messages:send'); assert.strictEqual(good.auth, 'Bearer at');
+    assert.match(good.msg.notification.title, /pat/); assert.match(good.msg.notification.body, /misses you/i);
+    assert.strictEqual(hits.fcmAuth.length, 1); assert.strictEqual(hits.fcmAuth[0].split('assertion=')[1].split('.').length, 3, 'a signed service-account JWT was exchanged');
+    hits.fcm.length = 0;
+    assert.strictEqual((await api(P.token, 'POST', '/api/ping', { kind: 'night' })).status, 200, 'the widget button pings over REST');
+    assert.ok(await waitFor(() => hits.fcm.length >= 1)); await sleep(300);
+    assert.strictEqual(JSON.stringify(hits.fcm.map(h => h.msg.token)), JSON.stringify(['good-token']), 'dead tokens are dropped once FCM says they are gone');
+    hits.fcm.length = 0;
+    assert.ok((await call(sp, 'note:add', { text: 'secret words' })).ok);
+    assert.ok(await waitFor(() => hits.fcm.length >= 1));
+    assert.match(hits.fcm[0].msg.notification.title, /note/); assert.ok(!JSON.stringify(hits.fcm[0].msg).includes('secret words'), 'note text never goes through push services');
+    hits.fcm.length = 0;
+    assert.ok((await call(sp, 'track:invite', { item: { title: 'Yt', link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' } })).ok);
+    assert.ok(await waitFor(() => hits.fcm.some(h => /listen/.test(h.msg.notification.title))), 'a listening invite is pushed');
+    const wid = await api(Q.token, 'GET', '/api/widget');
+    assert.strictEqual(wid.body.paired, true); assert.strictEqual(wid.body.name, 'pat'); assert.strictEqual(wid.body.lastPing.kind, 'night');
+    const solo = await newUser('solo'); assert.strictEqual((await api(solo.token, 'GET', '/api/widget')).body.paired, false);
+    hits.fcm.length = 0;
+    assert.ok((await call(sp, 'us:set', { countdown: { date: new Date().toISOString().slice(0, 10), label: 'Airport' } })).ok);
+    assert.ok(await waitFor(() => hits.fcm.some(h => /Airport/.test(h.msg.notification.title))), 'the countdown reminder is pushed');
+    const reminders = () => hits.fcm.filter(h => /Airport/.test(h.msg.notification.title)).length, sent = reminders(); await sleep(800);
+    assert.strictEqual(reminders(), sent, 'the reminder is sent only once');
+    sq = await connect(Q.token); hits.fcm.length = 0; hits.web.length = 0;
+    assert.ok((await call(sp, 'ping:send', { kind: 'morning' })).ok); await sleep(400);
+    assert.strictEqual(hits.fcm.length + hits.web.length, 0, 'back online: no push again');
+    assert.strictEqual((await api(Q.token, 'POST', '/api/push/unsubscribe', { all: true })).status, 200);
+    sq.close(); sp.close();
 
     // only the uploader may delete; delete purges every reference and the file
     assert.strictEqual((await api(B.token, 'DELETE', '/api/library/' + id)).status, 403);
@@ -155,5 +229,7 @@ const newUser = async name => (await fetch(BASE + '/api/users', { method: 'POST'
   } finally {
     await new Promise(r => { server.once('exit', r); server.kill('SIGTERM'); }); // let the shutdown flush finish first
     fs.rmSync(DATA_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(certDir, { recursive: true, force: true });
+    webMock.close(); fcmMock.close(); webMock.closeAllConnections?.(); fcmMock.closeAllConnections?.();
   }
 })().catch(e => { console.error('FAILED:', e); process.exit(1); });

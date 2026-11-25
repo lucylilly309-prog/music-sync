@@ -70,6 +70,29 @@ Tap **＋ Next** on any library song, favorite, playlist entry or link (or *Up n
 - Outside a session, **▶ Play together** takes the head, opens a session with it, and the rest plays as songs end.
 - Only uploaded songs and links can be queued (title-only suggestions cannot be played together). Limit: 100 entries. Deleting or renaming a library song updates the queue too.
 
+## Notifications
+
+Sent only to a partner who does **not** have the app open (otherwise they already get the live toast):
+
+- 💗🥺☀️🌙 **pings**, 🎧 **listening invites**, 🎵 **song suggestions**, 💌 **new notes**, and a **countdown reminder** ("Tomorrow: …" / "Today: …") at 08:00 in each person's own time zone.
+- Privacy: note text never goes through a push service (only "left you a note"); invites and suggestions include the song title.
+
+Turn them on per device in the **Style** tab (🔔 Notifications). Two delivery paths, both built in:
+
+- **Browsers and the installed web app (Web Push):** nothing to configure. The server creates VAPID keys on first start (`vapid.json` next to `data.json`). On a host that wipes its disk, set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` (`npx web-push generate-vapid-keys`) and `VAPID_SUBJECT` (`mailto:you@example.com`) so subscriptions survive restarts. On iPhone, add SyncPair to the Home Screen first (iOS 16.4+). Only Google, Mozilla, Microsoft and Apple push endpoints are accepted.
+- **Android app (Firebase Cloud Messaging):** Android's WebView has no Web Push, so the app registers with FCM. Create a Firebase project, add an Android app with package `com.syncpair.app`, then (1) save the downloaded `google-services.json` as the GitHub secret `GOOGLE_SERVICES_JSON` and rebuild the APK, and (2) generate a service-account key (Project settings → Service accounts) and set it on the server as `FIREBASE_SERVICE_ACCOUNT` (raw JSON or base64). The server talks to FCM HTTP v1 directly, no extra dependency.
+
+Server settings: `REMINDER_HOUR` (default `8`), `REMINDER_INTERVAL_MS` (default hourly check). Events: `ping:send` / `POST /api/ping`, `GET /api/push/key`, `POST /api/push/subscribe|fcm|unsubscribe`.
+
+## Android home-screen widget
+
+Long-press the home screen → Widgets → **SyncPair**. It shows your partner's online dot and local time (🌙 when they are probably asleep), their status, what they are playing right now, the countdown to your next visit, and three one-tap ping buttons (💗 🥺 🌙). Tapping the widget opens the app.
+
+- It polls `GET /api/widget` with the account token every 30 minutes, whenever the app is left or changes something, and right after a ping button. If the server is unreachable it keeps the last data and shows "offline".
+- Open the app once after installing so it can hand the widget the server address and token (`SyncPairWidget` Capacitor plugin). Signing out clears them.
+- Android only. An iPhone widget needs a Swift WidgetKit extension, which is not included.
+- The CI workflow installs the widget with `app-shell/scripts/apply-native.js` right after `npx cap add android`; to build locally run `npx cap add android && node scripts/apply-native.js && npx cap sync android`.
+
 ## Staying signed in
 
 - The account token is kept in `localStorage` **and** in a one-year `HttpOnly` cookie (`sp_session`). If the browser clears one, `GET /api/session` brings the account back from the other. The app also asks the browser for persistent storage.

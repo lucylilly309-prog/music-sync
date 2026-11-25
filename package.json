@@ -13,10 +13,11 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "web-push": "^4.0.0"
   },
   "devDependencies": {
-    "socket.io-client": "^4.8.4",
-    "jsdom": "^25.0.1"
+    "jsdom": "^25.0.1",
+    "socket.io-client": "^4.8.4"
   }
 }

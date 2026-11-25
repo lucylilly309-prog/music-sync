@@ -8,6 +8,19 @@
       "tokenHash": "71210e6b9276677788af648dcad6362fbc6c9388bf156d9be806a706eddbe19c",
       "recent": [
         {
+          "key": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "trackId": "097dc4a0-d010-4187-8f3e-87325177b1a7",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
+          "playedAt": 1795387993623
+        },
+        {
           "key": "lk:ln:youtube:6fcb81205bde",
           "trackId": null,
           "provider": "youtube",
@@ -19,19 +32,6 @@
           "link": "https://www.youtube.com/watch?v=klyKJsuxQuc",
           "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
           "playedAt": 1795294556794
-        },
-        {
-          "key": "097dc4a0-d010-4187-8f3e-87325177b1a7",
-          "trackId": "097dc4a0-d010-4187-8f3e-87325177b1a7",
-          "provider": null,
-          "ref": null,
-          "linkId": null,
-          "app": "",
-          "title": "Mitski - My Love Mine All Mine",
-          "artist": "Unknown artist",
-          "link": "",
-          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a",
-          "playedAt": 1795288575797
         },
         {
           "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
@@ -114,7 +114,7 @@
           "artist": "",
           "link": "https://open.spotify.com/track/4SqWKzw0CbA05TGszDgMlc",
           "addedBy": "u_94996b2c-cea3-429a-8701-abd82ddb4489",
-          "playedAt": 1795295572811
+          "playedAt": 1795388458848
         },
         {
           "key": "lk:ln:youtube:6fcb81205bde",
@@ -139,6 +139,19 @@
       "partnerId": "u_94996b2c-cea3-429a-8701-abd82ddb4489",
       "recent": [
         {
+          "key": "lk:ln:youtube:6fcb81205bde",
+          "trackId": null,
+          "provider": "youtube",
+          "ref": "klyKJsuxQuc",
+          "linkId": "ln:youtube:6fcb81205bde",
+          "app": "",
+          "title": "song",
+          "artist": "",
+          "link": "https://www.youtube.com/watch?v=klyKJsuxQuc",
+          "addedBy": "u_86b61c29-701a-440d-b373-c1bd99c7c3f0",
+          "playedAt": 1795388723558
+        },
+        {
           "key": "lk:ln:spotify:3b21bba68686",
           "trackId": null,
           "provider": "spotify",
@@ -150,19 +163,6 @@
           "link": "https://open.spotify.com/track/4SqWKzw0CbA05TGszDgMlc",
           "addedBy": "u_86b61c29-701a-440d-b373-c1bd99c7c3f0",
           "playedAt": 1795295574714
-        },
-        {
-          "key": "lk:ln:youtube:6fcb81205bde",
-          "trackId": null,
-          "provider": "youtube",
-          "ref": "klyKJsuxQuc",
-          "linkId": "ln:youtube:6fcb81205bde",
-          "app": "",
-          "title": "song",
-          "artist": "",
-          "link": "https://www.youtube.com/watch?v=klyKJsuxQuc",
-          "addedBy": "u_86b61c29-701a-440d-b373-c1bd99c7c3f0",
-          "playedAt": 1795295376194
         }
       ]
     }
@@ -224,12 +224,54 @@
           "text": "yoo",
           "createdAt": 1795293766027
         }
-      ]
+      ],
+      "queue": [
+        {
+          "key": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "trackId": "0b1cf4b8-85f6-4aab-9ac5-af18681735fa",
+          "provider": null,
+          "ref": null,
+          "linkId": null,
+          "app": "",
+          "title": "Mitski - My Love Mine All Mine",
+          "artist": "Unknown artist",
+          "link": "",
+          "addedBy": "u_ae405695-4089-4134-8082-aa76dcfae42a"
+        }
+      ],
+      "roomName": "our home"
     },
     "u_86b61c29-701a-440d-b373-c1bd99c7c3f0:u_94996b2c-cea3-429a-8701-abd82ddb4489": {
       "favorites": [],
       "playlists": [],
-      "notes": []
+      "notes": [],
+      "queue": [
+        {
+          "key": "lk:ln:spotify:3b21bba68686",
+          "trackId": null,
+          "provider": "spotify",
+          "ref": "spotify:track:4SqWKzw0CbA05TGszDgMlc",
+          "linkId": "ln:spotify:3b21bba68686",
+          "app": "",
+          "title": "i love you",
+          "artist": "",
+          "link": "https://open.spotify.com/track/4SqWKzw0CbA05TGszDgMlc",
+          "addedBy": "u_86b61c29-701a-440d-b373-c1bd99c7c3f0"
+        },
+        {
+          "key": "lk:ln:youtube:6fcb81205bde",
+          "trackId": null,
+          "provider": "youtube",
+          "ref": "klyKJsuxQuc",
+          "linkId": "ln:youtube:6fcb81205bde",
+          "app": "",
+          "title": "song",
+          "artist": "",
+          "link": "https://www.youtube.com/watch?v=klyKJsuxQuc",
+          "addedBy": "u_94996b2c-cea3-429a-8701-abd82ddb4489"
+        }
+      ],
+      "roomName": "our thing"
     }
   }
 }

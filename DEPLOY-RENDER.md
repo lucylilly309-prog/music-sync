@@ -17,3 +17,7 @@ Do not use ephemeral storage for uploaded audio or user data: without the persis
 Already in place: token-authenticated library and audio access, per-file (50 MB) and per-couple (250 MB) limits, request rate limits and atomic data writes with a rolling backup. Still recommended before wider use: a real database, off-disk backups, audio file validation and abuse reporting.
 
 The server keeps `data.json.bak` next to `data.json` on the disk and flushes pending writes when Render stops the service. Never commit `data.json`, `data.json.bak` or `music/`: they contain account token hashes and private audio.
+
+## Notifications and the widget
+
+Optional environment variables: `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` (keep Web Push subscriptions valid across restarts; generate with `npx web-push generate-vapid-keys`) and `FIREBASE_SERVICE_ACCOUNT` (Android push; see *Notifications* in the README). The Android widget needs no server setup: it uses `GET /api/widget`.
